@@ -42,6 +42,7 @@ export default function ChatScreen() {
   const [loadingOlder, setLoadingOlder] = useState(false);
   const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const seenMsgIds = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     if (!code) return;
@@ -108,6 +109,30 @@ export default function ChatScreen() {
       q,
       async (snap) => {
         const docs = snap.docs;
+        const isHidden = document.hidden;
+
+        // Forward new messages from others to SW when page is backgrounded
+        if (isHidden && user) {
+          snap.docChanges().forEach((change) => {
+            if (change.type !== 'added') return;
+            const id = change.doc.id;
+            if (seenMsgIds.current.has(id)) return;
+            seenMsgIds.current.add(id);
+            const d = change.doc.data();
+            if (d.senderUid !== user.uid) {
+              swSend({
+                type: 'SHOW_NOTIFICATION',
+                roomCode: code,
+                senderName: d.senderName,
+                replyToUid: d.replyToUid || null,
+                mentionedUids: d.mentionedUids || [],
+              });
+            }
+          });
+        } else {
+          docs.forEach((d) => seenMsgIds.current.add(d.id));
+        }
+
         if (docs.length === 0) {
           setMessages([]);
           setLoading(false);
