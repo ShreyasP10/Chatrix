@@ -14,8 +14,8 @@ export default defineConfig({
       filename: 'sw.ts',
       includeAssets: ['icons/*.svg', 'icons/*.png'],
       manifest: {
-        name: 'ChatWave',
-        short_name: 'ChatWave',
+        name: 'Chatrix',
+        short_name: 'Chatrix',
         description: 'Anonymous Encrypted Group Chat',
         theme_color: '#000000',
         background_color: '#000000',

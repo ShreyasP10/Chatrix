@@ -31,7 +31,13 @@ export default function Dashboard() {
   const { showPrompt, install } = useInstallPrompt();
 
   useEffect(() => {
-    localDB.joinedRooms.toArray().then(setJoinedRooms);
+    localDB.joinedRooms.toArray().then((rooms) => {
+      setJoinedRooms(rooms);
+      const codes = rooms.map((r) => r.code);
+      if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
+        navigator.serviceWorker.controller.postMessage({ type: 'WATCH_ROOMS', rooms: codes });
+      }
+    });
   }, [setJoinedRooms]);
 
   useEffect(() => {
@@ -75,7 +81,7 @@ export default function Dashboard() {
         return;
       }
       if (user) {
-        await setDoc(doc(db, 'rooms', code, 'members', user.uid), { joinedAt: serverTimestamp() });
+        await setDoc(doc(db, 'rooms', code, 'members', user.uid), { joinedAt: serverTimestamp(), name: user.name });
       }
       const room: JoinedRoom = {
         code,
@@ -84,6 +90,10 @@ export default function Dashboard() {
       };
       await localDB.joinedRooms.put(room);
       addJoinedRoom(room);
+      if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
+        const allRooms = [...useStore.getState().joinedRooms.map((r) => r.code), code];
+        navigator.serviceWorker.controller.postMessage({ type: 'WATCH_ROOMS', rooms: allRooms });
+      }
       navigate(`/chat/${code}`);
     } catch {
       setError('Failed to join room');
@@ -114,7 +124,7 @@ export default function Dashboard() {
         createdBy: user?.uid,
       });
       if (user) {
-        await setDoc(doc(db, 'rooms', newCode, 'members', user.uid), { joinedAt: serverTimestamp() });
+        await setDoc(doc(db, 'rooms', newCode, 'members', user.uid), { joinedAt: serverTimestamp(), name: user.name });
       }
       const room: JoinedRoom = {
         code: newCode,
@@ -159,11 +169,11 @@ export default function Dashboard() {
           <Avatar name={user.name} size="lg" />
           <div>
             <p className="text-sm font-semibold">{user.name}</p>
-            <p className="text-xs text-[#B3B3B3]">ChatWave</p>
+            <p className="text-xs text-[#B3B3B3]">Chatrix</p>
           </div>
         </div>
       )}
-      <h1 className="text-3xl font-bold tracking-tight mb-2">ChatWave</h1>
+      <h1 className="text-3xl font-bold tracking-tight mb-2">Chatrix</h1>
       <p className="text-sm text-[#B3B3B3] mb-10">Anonymous &middot; Encrypted</p>
 
       <OtpInput value={code} onChange={setCode} />

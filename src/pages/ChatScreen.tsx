@@ -34,6 +34,7 @@ export default function ChatScreen() {
   const [memberCount, setMemberCount] = useState<number | null>(null);
   const [replyTo, setReplyTo] = useState<ReplyTo | null>(null);
   const [typingUsers, setTypingUsers] = useState<TypingUser[]>([]);
+  const [memberNameMap, setMemberNameMap] = useState<Record<string, string>>({});
   const bottomRef = useRef<HTMLDivElement>(null);
   const lastDocRef = useRef<any>(null);
   const [hasMore, setHasMore] = useState(true);
@@ -44,6 +45,15 @@ export default function ChatScreen() {
   useEffect(() => {
     if (!code) return;
     deriveKey(code).then(setCryptoKey);
+    // Tell SW this is the active room (suppress notifications for it)
+    if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
+      navigator.serviceWorker.controller.postMessage({ type: 'ACTIVE_ROOM', code });
+    }
+    return () => {
+      if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
+        navigator.serviceWorker.controller.postMessage({ type: 'ACTIVE_ROOM', code: null });
+      }
+    };
   }, [code]);
 
   useEffect(() => {
@@ -57,7 +67,15 @@ export default function ChatScreen() {
   useEffect(() => {
     if (!code) return;
     const q = query(collection(db, 'rooms', code, 'members'));
-    const unsub = onSnapshot(q, (snap) => setMemberCount(snap.size));
+    const unsub = onSnapshot(q, (snap) => {
+      setMemberCount(snap.size);
+      const map: Record<string, string> = {};
+      snap.forEach((d) => {
+        const data = d.data();
+        if (data.name) map[data.name.toLowerCase()] = d.id;
+      });
+      setMemberNameMap(map);
+    });
     return unsub;
   }, [code]);
 
@@ -182,6 +200,7 @@ export default function ChatScreen() {
     setReplyTo({
       messageId: msg.id,
       senderName: msg.senderName,
+      senderUid: msg.senderUid,
       text: msg.text.slice(0, 80),
     });
     inputRef.current?.focus();
@@ -196,19 +215,27 @@ export default function ChatScreen() {
     setInput('');
 
     const payload: any = { text };
+    const msgData: any = {
+      senderUid: user.uid,
+      senderName: user.name,
+      timestamp: serverTimestamp(),
+    };
+
     if (replyTo) {
       payload.replyTo = { messageId: replyTo.messageId, senderName: replyTo.senderName, text: replyTo.text };
+      msgData.replyToUid = replyTo.senderUid;
+    }
+
+    const mentionedUids = parseMentions(text, memberNameMap);
+    if (mentionedUids.length > 0) {
+      msgData.mentionedUids = mentionedUids;
     }
 
     try {
       const { ciphertext, iv } = await encrypt(JSON.stringify(payload), cryptoKey);
-      await addDoc(collection(db, 'rooms', code, 'messages'), {
-        senderUid: user.uid,
-        senderName: user.name,
-        ciphertext,
-        iv,
-        timestamp: serverTimestamp(),
-      });
+      msgData.ciphertext = ciphertext;
+      msgData.iv = iv;
+      await addDoc(collection(db, 'rooms', code, 'messages'), msgData);
       setReplyTo(null);
       updateTypingStatus('');
     } catch {
@@ -300,7 +327,7 @@ export default function ChatScreen() {
                       : 'bg-[#1C1C1E] text-white rounded-bl-md'
                   }`}
                 >
-                  {msg.text}
+                  <MentionText text={msg.text} />
                 </div>
                 <button
                   onClick={() => handleReply(msg)}
@@ -356,6 +383,33 @@ export default function ChatScreen() {
         </div>
       </div>
     </div>
+  );
+}
+
+function parseMentions(text: string, nameMap: Record<string, string>): string[] {
+  const uids: string[] = [];
+  const seen = new Set<string>();
+  const matches = text.matchAll(/@(\S+)/g);
+  for (const match of matches) {
+    const name = match[1].replace(/[^a-zA-Z0-9_\u0080-\uFFFF\s]/g, '').toLowerCase();
+    if (name && nameMap[name] && !seen.has(nameMap[name])) {
+      seen.add(nameMap[name]);
+      uids.push(nameMap[name]);
+    }
+  }
+  return uids;
+}
+
+function MentionText({ text }: { text: string }) {
+  const parts = text.split(/(@\w+)/g);
+  return (
+    <>
+      {parts.map((part, i) =>
+        /^@\w+$/.test(part)
+          ? <span key={i} className="text-[#00FF88] font-medium">{part}</span>
+          : part
+      )}
+    </>
   );
 }
 
