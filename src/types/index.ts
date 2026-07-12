@@ -13,6 +13,7 @@ export interface JoinedRoom {
 export interface ReplyTo {
   messageId: string;
   senderName: string;
+  senderUid: string;
   text: string;
 }
 
@@ -47,6 +48,8 @@ export interface FirestoreMessage {
   ciphertext: string;
   iv: string;
   timestamp: object;
+  replyToUid?: string;
+  mentionedUids?: string[];
 }
 
 export interface FirestoreToken {
@@ -58,6 +61,7 @@ export interface FirestoreToken {
 
 export interface FirestoreMember {
   joinedAt: object;
+  name: string;
 }
 
 export interface TypingUser {

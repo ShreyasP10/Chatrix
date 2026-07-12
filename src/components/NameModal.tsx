@@ -18,6 +18,12 @@ export default function NameModal() {
     setLoading(true);
     const uid = crypto.randomUUID();
     const profile: UserProfile = { uid, name: trimmed, createdAt: Date.now() };
+
+    // IndexedDB is instant — always works, unblocks the user immediately
+    await localDB.userProfile.put(profile);
+    setUser(profile);
+
+    // Firestore write is best-effort; never block the user on it
     try {
       await setDoc(doc(db, 'users', uid), {
         name: trimmed,
@@ -25,10 +31,9 @@ export default function NameModal() {
         lastSeen: serverTimestamp(),
       });
     } catch {
-      // Firestore write is best-effort; app functions locally regardless
+      // Firestore unavailable — app works fine without it
     }
-    await localDB.userProfile.put(profile);
-    setUser(profile);
+
     setLoading(false);
   };
 

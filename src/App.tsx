@@ -1,10 +1,17 @@
 import { useEffect, useState } from 'react';
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import { firebaseConfig } from './lib/firebase';
 import { localDB } from './lib/db';
 import { useStore } from './store/useStore';
 import NameModal from './components/NameModal';
 import Dashboard from './pages/Dashboard';
 import ChatScreen from './pages/ChatScreen';
+
+function swSend(msg: any) {
+  if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
+    navigator.serviceWorker.controller.postMessage(msg);
+  }
+}
 
 export default function App() {
   const { user, setUser } = useStore();
@@ -18,6 +25,17 @@ export default function App() {
       setLoading(false);
     });
   }, [setUser]);
+
+  // Sync Firebase config + user UID to service worker for background notifications
+  useEffect(() => {
+    swSend({ type: 'FIREBASE_CONFIG', config: firebaseConfig });
+  }, []);
+
+  useEffect(() => {
+    if (user) {
+      swSend({ type: 'USER_UID', uid: user.uid });
+    }
+  }, [user]);
 
   if (loading) {
     return (
