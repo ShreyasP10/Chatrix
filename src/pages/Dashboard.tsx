@@ -16,6 +16,7 @@ import { localDB } from '../lib/db';
 import { deriveKey, decrypt } from '../lib/crypto';
 import { useStore } from '../store/useStore';
 import { useInstallPrompt } from '../hooks/useInstallPrompt';
+import { swSend } from '../lib/sw';
 import OtpInput from '../components/OtpInput';
 import Avatar from '../components/Avatar';
 import type { JoinedRoom } from '../types';
@@ -34,9 +35,7 @@ export default function Dashboard() {
     localDB.joinedRooms.toArray().then((rooms) => {
       setJoinedRooms(rooms);
       const codes = rooms.map((r) => r.code);
-      if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
-        navigator.serviceWorker.controller.postMessage({ type: 'WATCH_ROOMS', rooms: codes });
-      }
+      swSend({ type: 'WATCH_ROOMS', rooms: codes });
     });
   }, [setJoinedRooms]);
 
@@ -90,10 +89,8 @@ export default function Dashboard() {
       };
       await localDB.joinedRooms.put(room);
       addJoinedRoom(room);
-      if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
-        const allRooms = [...useStore.getState().joinedRooms.map((r) => r.code), code];
-        navigator.serviceWorker.controller.postMessage({ type: 'WATCH_ROOMS', rooms: allRooms });
-      }
+      const allRooms = [...useStore.getState().joinedRooms.map((r) => r.code), code];
+      swSend({ type: 'WATCH_ROOMS', rooms: allRooms });
       navigate(`/chat/${code}`);
     } catch {
       setError('Failed to join room');
