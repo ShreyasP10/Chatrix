@@ -16,6 +16,7 @@ import {
 } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { deriveKey, encrypt, decrypt } from '../lib/crypto';
+import { swSend } from '../lib/sw';
 import { useStore } from '../store/useStore';
 import Avatar from '../components/Avatar';
 import type { DecryptedMessage, ReplyTo, TypingUser } from '../types';
@@ -46,14 +47,8 @@ export default function ChatScreen() {
     if (!code) return;
     deriveKey(code).then(setCryptoKey);
     // Tell SW this is the active room (suppress notifications for it)
-    if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
-      navigator.serviceWorker.controller.postMessage({ type: 'ACTIVE_ROOM', code });
-    }
-    return () => {
-      if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
-        navigator.serviceWorker.controller.postMessage({ type: 'ACTIVE_ROOM', code: null });
-      }
-    };
+    swSend({ type: 'ACTIVE_ROOM', code });
+    return () => { swSend({ type: 'ACTIVE_ROOM', code: null }); };
   }, [code]);
 
   useEffect(() => {

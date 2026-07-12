@@ -1,17 +1,12 @@
 import { useEffect, useState } from 'react';
 import { BrowserRouter, Routes, Route } from 'react-router-dom';
 import { firebaseConfig } from './lib/firebase';
+import { swSend } from './lib/sw';
 import { localDB } from './lib/db';
 import { useStore } from './store/useStore';
 import NameModal from './components/NameModal';
 import Dashboard from './pages/Dashboard';
 import ChatScreen from './pages/ChatScreen';
-
-function swSend(msg: any) {
-  if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
-    navigator.serviceWorker.controller.postMessage(msg);
-  }
-}
 
 export default function App() {
   const { user, setUser } = useStore();

@@ -107,7 +107,7 @@ function handleNewMessage(roomCode: string, data: any, _docId: string) {
     icon: '/icons/icon-192.png',
     badge: '/icons/icon-192.png',
     data: { roomCode, type: 'new_message' },
-    tag: `chatwave-${roomCode}-${_docId}`,
+    tag: `chatrix-${roomCode}`,
   });
 }
 
@@ -130,7 +130,7 @@ self.addEventListener('push', (event) => {
       icon: '/icons/icon-192.png',
       badge: '/icons/icon-192.png',
       data: { roomCode, type: payload.type || 'new_message' },
-      tag: roomCode ? `chatwave-${roomCode}` : 'chatwave',
+      tag: roomCode ? `chatrix-${roomCode}` : 'chatrix',
     })
   );
 });
