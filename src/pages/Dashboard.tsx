@@ -1,9 +1,10 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   doc,
   getDoc,
   setDoc,
+  updateDoc,
   collection,
   query,
   orderBy,
@@ -27,9 +28,12 @@ export default function Dashboard() {
   const [code, setCode] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState('');
+  const [editingName, setEditingName] = useState(false);
+  const [nameInput, setNameInput] = useState('');
   const navigate = useNavigate();
-  const { user, joinedRooms, setJoinedRooms, addJoinedRoom } = useStore();
+  const { user, setUser, joinedRooms, setJoinedRooms, addJoinedRoom } = useStore();
   const { showPrompt, install } = useInstallPrompt();
+  const nameInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     localDB.joinedRooms.toArray().then((rooms) => {
@@ -137,6 +141,29 @@ export default function Dashboard() {
     setLoading('');
   };
 
+  const startEditName = () => {
+    if (!user) return;
+    setNameInput(user.name);
+    setEditingName(true);
+    setTimeout(() => nameInputRef.current?.focus(), 50);
+  };
+
+  const saveName = async () => {
+    if (!user) return;
+    const trimmed = nameInput.trim();
+    if (!trimmed || trimmed === user.name) {
+      setEditingName(false);
+      return;
+    }
+    const updated = { ...user, name: trimmed };
+    setUser(updated);
+    await localDB.userProfile.put(updated);
+    try {
+      await updateDoc(doc(db, 'users', user.uid), { name: trimmed });
+    } catch {}
+    setEditingName(false);
+  };
+
   const getLastMessage = useCallback(async (roomCode: string) => {
     try {
       const q = query(
@@ -164,8 +191,33 @@ export default function Dashboard() {
       {user && (
         <div className="flex items-center gap-3 mb-4 self-start">
           <Avatar name={user.name} size="lg" />
-          <div>
-            <p className="text-sm font-semibold">{user.name}</p>
+          <div className="flex-1 min-w-0">
+            {editingName ? (
+              <div className="flex items-center gap-2">
+                <input
+                  ref={nameInputRef}
+                  value={nameInput}
+                  onChange={(e) => setNameInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') saveName();
+                    if (e.key === 'Escape') setEditingName(false);
+                  }}
+                  onBlur={saveName}
+                  maxLength={30}
+                  className="bg-[#1C1C1E] text-white text-sm font-semibold rounded-lg px-2 py-1 outline-none border border-[#333] w-full"
+                />
+              </div>
+            ) : (
+              <div className="flex items-center gap-2">
+                <p className="text-sm font-semibold">{user.name}</p>
+                <button onClick={startEditName} className="text-[#555] hover:text-[#007AFF] transition-colors">
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5">
+                    <path d="m5.433 13.917 1.262-3.155A4 4 0 0 1 7.58 9.42l6.92-6.918a2.121 2.121 0 0 1 3 3l-6.92 6.918c-.383.383-.84.685-1.343.886l-3.154 1.262a.5.5 0 0 1-.65-.65Z" />
+                    <path d="M3.5 5.75c0-.69.56-1.25 1.25-1.25H10A.75.75 0 0 0 10 3H4.75A2.75 2.75 0 0 0 2 5.75v9.5A2.75 2.75 0 0 0 4.75 18h9.5A2.75 2.75 0 0 0 17 15.25V10a.75.75 0 0 0-1.5 0v5.25c0 .69-.56 1.25-1.25 1.25h-9.5c-.69 0-1.25-.56-1.25-1.25v-9.5Z" />
+                  </svg>
+                </button>
+              </div>
+            )}
             <p className="text-xs text-[#B3B3B3]">Chatrix</p>
           </div>
         </div>
@@ -207,11 +259,16 @@ export default function Dashboard() {
 
       {joinedRooms.length > 0 && (
         <div className="w-full mt-10">
-          <h2 className="text-sm font-semibold text-[#B3B3B3] uppercase tracking-wide mb-3">
-            Your Chats
-          </h2>
-          <div className="space-y-2">
-            {joinedRooms.map((room) => (
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-xs font-semibold text-[#666] uppercase tracking-widest">
+              Your Rooms
+            </h2>
+            <span className="text-[10px] text-[#444] font-mono">
+              {joinedRooms.length} room{joinedRooms.length !== 1 ? 's' : ''}
+            </span>
+          </div>
+          <div className="space-y-2.5">
+            {[...joinedRooms].reverse().map((room) => (
               <RoomItem
                 key={room.code}
                 room={room}
@@ -235,7 +292,8 @@ function RoomItem({
   onEnter: () => void;
   getLastMessage: (code: string) => Promise<{ text: string; timestamp: number; senderUid: string } | null>;
 }) {
-  const [preview, setPreview] = useState<{ text: string; timestamp: number } | null>(null);
+  const [preview, setPreview] = useState<{ text: string; timestamp: number; senderUid: string } | null>(null);
+  const { user } = useStore();
 
   useEffect(() => {
     let cancelled = false;
@@ -250,30 +308,54 @@ function RoomItem({
     const now = new Date();
     const diff = now.getTime() - d.getTime();
     if (diff < 60000) return 'Just now';
-    if (diff < 3600000) return `${Math.floor(diff / 60000)} min ago`;
-    if (diff < 86400000) return `${Math.floor(diff / 3600000)} hr ago`;
-    return d.toLocaleDateString();
+    if (diff < 3600000) return `${Math.floor(diff / 60000)}m`;
+    if (diff < 86400000) return `${Math.floor(diff / 3600000)}h`;
+    if (diff < 604800000) return `${Math.floor(diff / 86400000)}d`;
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   };
+
+  function roomGradient(code: string) {
+    let hash = 0;
+    for (let i = 0; i < code.length; i++) hash = code.charCodeAt(i) + ((hash << 5) - hash);
+    const h = Math.abs(hash) % 360;
+    return `linear-gradient(135deg, hsl(${h}, 55%, 40%), hsl(${(h + 40) % 360}, 50%, 30%))`;
+  }
 
   return (
     <button
       onClick={onEnter}
-      className="w-full flex items-center gap-3 p-4 rounded-xl border border-[#333] bg-[#0D0D0D] text-left hover:border-[#555] transition-colors"
+      className="w-full flex items-center gap-4 p-4 rounded-2xl border border-[#222] bg-[#0D0D0D] text-left hover:bg-[#141414] hover:border-[#444] transition-all active:scale-[0.98] group"
     >
-      <div className="w-10 h-10 rounded-full bg-[#1C1C1E] flex items-center justify-center font-bold text-[#007AFF] shrink-0">
+      <div
+        className="w-12 h-12 rounded-2xl flex items-center justify-center font-bold text-white text-sm shrink-0 shadow-lg"
+        style={{ background: roomGradient(room.code) }}
+      >
         #{room.code}
       </div>
       <div className="flex-1 min-w-0">
-        <p className="text-sm font-medium text-white">Room #{room.code}</p>
-        <p className="text-xs text-[#B3B3B3] truncate mt-0.5">
-          {preview ? preview.text : 'No messages yet'}
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-sm font-semibold text-white">Room #{room.code}</p>
+          {preview && (
+            <span className="text-[10px] text-[#555] shrink-0 font-medium">
+              {formatTime(preview.timestamp)}
+            </span>
+          )}
+        </div>
+        <p className="text-xs text-[#666] truncate mt-1 flex items-center gap-1">
+          {preview ? (
+            <>
+              <span className={preview.senderUid === user?.uid ? 'text-[#007AFF]' : 'text-[#00FF88]'}>
+                {preview.senderUid === user?.uid ? 'You' : preview.senderUid?.slice(0, 6)}
+              </span>
+              <span className="text-[#444]">&middot;</span>
+              <span>{preview.text}</span>
+            </>
+          ) : (
+            <span className="text-[#555] italic">No messages yet</span>
+          )}
         </p>
       </div>
-      {preview && (
-        <span className="text-xs text-[#555] shrink-0">
-          {formatTime(preview.timestamp)}
-        </span>
-      )}
+      <div className="w-2 h-2 rounded-full bg-[#007AFF] opacity-0 group-hover:opacity-100 transition-opacity shrink-0" />
     </button>
   );
 }

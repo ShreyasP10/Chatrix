@@ -19,6 +19,7 @@ export interface ReplyTo {
 
 export interface EncryptedPayload {
   text: string;
+  type?: 'text' | 'image' | 'gif';
   replyTo?: { messageId: string; senderName: string; text: string };
 }
 
@@ -27,7 +28,9 @@ export interface DecryptedMessage {
   senderUid: string;
   senderName: string;
   text: string;
+  type?: 'text' | 'image' | 'gif';
   replyTo?: ReplyTo;
+  edited?: boolean;
   timestamp: number;
 }
 
@@ -50,6 +53,7 @@ export interface FirestoreMessage {
   timestamp: object;
   replyToUid?: string;
   mentionedUids?: string[];
+  edited?: boolean;
 }
 
 export interface FirestoreToken {
