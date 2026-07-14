@@ -31,6 +31,8 @@ export interface DecryptedMessage {
   type?: 'text' | 'image' | 'gif';
   replyTo?: ReplyTo;
   edited?: boolean;
+  deleted?: boolean;
+  reactions?: Record<string, string[]>;
   timestamp: number;
 }
 
@@ -54,6 +56,8 @@ export interface FirestoreMessage {
   replyToUid?: string;
   mentionedUids?: string[];
   edited?: boolean;
+  deleted?: boolean;
+  reactions?: Record<string, string[]>;
 }
 
 export interface FirestoreToken {

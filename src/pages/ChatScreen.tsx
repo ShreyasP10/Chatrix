@@ -10,6 +10,7 @@ import {
   updateDoc,
   serverTimestamp,
   getDocs,
+  getDoc,
   startAfter,
   doc,
   setDoc,
@@ -39,19 +40,26 @@ export default function ChatScreen() {
   const [typingUsers, setTypingUsers] = useState<TypingUser[]>([]);
   const [memberNameMap, setMemberNameMap] = useState<Record<string, string>>({});
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [menuMsgId, setMenuMsgId] = useState<string | null>(null);
+  const [reactingMsgId, setReactingMsgId] = useState<string | null>(null);
+  const [showMembers, setShowMembers] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  const [roomReady, setRoomReady] = useState(false);
   const [memberList, setMemberList] = useState<{ name: string; uid: string }[]>([]);
   const [mentionQuery, setMentionQuery] = useState('');
   const [mentionStartIndex, setMentionStartIndex] = useState(-1);
   const [mentionSelectedIndex, setMentionSelectedIndex] = useState(0);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const messagesRef = useRef<HTMLDivElement>(null);
   const lastDocRef = useRef<any>(null);
   const [hasMore, setHasMore] = useState(true);
   const [loadingOlder, setLoadingOlder] = useState(false);
+  const scrollAnchorRef = useRef<{ scrollHeight: number } | null>(null);
   const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const seenMsgIds = useRef<Set<string>>(new Set());
+  const initialSnapshotDone = useRef(false);
 
   useEffect(() => {
     if (!code) return;
@@ -62,12 +70,17 @@ export default function ChatScreen() {
   }, [code]);
 
   useEffect(() => {
-    if (!code) return;
-    const unsub = onSnapshot(doc(db, 'rooms', code), (snap) => {
-      if (!snap.exists()) navigate('/', { replace: true });
+    if (!code || !user) return;
+    setRoomReady(false);
+    const unsub = onSnapshot(doc(db, 'rooms', code), async (snap) => {
+      if (!snap.exists()) {
+        await setDoc(doc(db, 'rooms', code), { createdAt: serverTimestamp() });
+        await setDoc(doc(db, 'rooms', code, 'members', user.uid), { joinedAt: serverTimestamp(), name: user.name });
+      }
+      setRoomReady(true);
     });
     return unsub;
-  }, [code, navigate]);
+  }, [code, user]);
 
   useEffect(() => {
     if (!code) return;
@@ -110,12 +123,14 @@ export default function ChatScreen() {
   }, [code, user?.uid]);
 
   useEffect(() => {
-    if (!code || !cryptoKey) return;
+    if (!code || !cryptoKey || !roomReady) return;
     setLoading(true);
+    initialSnapshotDone.current = false;
 
     const q = query(
       collection(db, 'rooms', code, 'messages'),
       orderBy('timestamp', 'desc'),
+      orderBy('__name__', 'desc'),
       limit(PAGE_SIZE)
     );
 
@@ -147,29 +162,67 @@ export default function ChatScreen() {
           docs.forEach((d) => seenMsgIds.current.add(d.id));
         }
 
-        if (docs.length === 0) {
-          setMessages([]);
-          setLoading(false);
-          return;
-        }
+        // Keep pagination state in sync
         lastDocRef.current = docs[docs.length - 1] || null;
         setHasMore(docs.length >= PAGE_SIZE);
 
-        const decrypted = await Promise.all(
-          docs.map(async (d) => decryptMessage(d.data(), d.id, cryptoKey))
-        );
-        setMessages(decrypted.reverse());
-        setLoading(false);
+        if (!initialSnapshotDone.current) {
+          initialSnapshotDone.current = true;
+          if (docs.length === 0) {
+            setMessages([]);
+            setLoading(false);
+            return;
+          }
+          const decrypted = await Promise.all(
+            docs.map(async (d) => decryptMessage(d.data(), d.id, cryptoKey))
+          );
+          setMessages(decrypted.reverse());
+          setLoading(false);
+        } else {
+          // Subsequent snapshots: only add/update messages incrementally
+          for (const change of snap.docChanges()) {
+            if (change.type === 'modified') {
+              const msg = await decryptMessage(change.doc.data(), change.doc.id, cryptoKey);
+              setMessages((prev) => {
+                const idx = prev.findIndex((m) => m.id === msg.id);
+                if (idx >= 0) {
+                  const updated = [...prev];
+                  updated[idx] = msg;
+                  return updated;
+                }
+                return prev;
+              });
+            } else if (change.type === 'added') {
+              const msg = await decryptMessage(change.doc.data(), change.doc.id, cryptoKey);
+              setMessages((prev) => {
+                if (prev.some((m) => m.id === msg.id)) return prev;
+                return [...prev, msg];
+              });
+            }
+            // Ignore 'removed' to preserve older loaded messages
+          }
+        }
       },
       () => setLoading(false)
     );
 
     return unsub;
-  }, [code, cryptoKey, setMessages]);
+  }, [code, cryptoKey, roomReady, setMessages]);
 
   useEffect(() => {
-    if (!loading) bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, loading]);
+    if (loading || loadingOlder) return;
+    if (scrollAnchorRef.current) {
+      const el = messagesRef.current;
+      if (el) {
+        const newHeight = el.scrollHeight;
+        const diff = newHeight - scrollAnchorRef.current.scrollHeight;
+        el.scrollTop += diff;
+      }
+      scrollAnchorRef.current = null;
+    } else {
+      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [messages, loading, loadingOlder]);
 
   const loadOlder = useCallback(async () => {
     if (!code || !cryptoKey || !lastDocRef.current || !hasMore || loadingOlder) return;
@@ -177,6 +230,7 @@ export default function ChatScreen() {
     const q = query(
       collection(db, 'rooms', code, 'messages'),
       orderBy('timestamp', 'desc'),
+      orderBy('__name__', 'desc'),
       startAfter(lastDocRef.current),
       limit(PAGE_SIZE)
     );
@@ -189,6 +243,8 @@ export default function ChatScreen() {
       docs.map((d) => decryptMessage(d.data(), d.id, cryptoKey))
     );
 
+    const el = messagesRef.current;
+    if (el) scrollAnchorRef.current = { scrollHeight: el.scrollHeight };
     setMessages((prev) => [...older.reverse(), ...prev]);
     setLoadingOlder(false);
   }, [code, cryptoKey, hasMore, loadingOlder]);
@@ -332,6 +388,33 @@ export default function ChatScreen() {
     inputRef.current?.focus();
   };
 
+  const deleteMessage = async (msgId: string) => {
+    if (!code || !user) return;
+    try {
+      await updateDoc(doc(db, 'rooms', code, 'messages', msgId), { deleted: true });
+    } catch {}
+    setMenuMsgId(null);
+  };
+
+  const toggleReaction = async (msgId: string, emoji: string) => {
+    if (!code || !user) return;
+    const msgRef = doc(db, 'rooms', code, 'messages', msgId);
+    try {
+      const snap = await getDoc(msgRef);
+      if (!snap.exists()) return;
+      const data = snap.data();
+      const reactions: Record<string, string[]> = data.reactions || {};
+      const users = reactions[emoji] || [];
+      if (users.includes(user.uid)) {
+        reactions[emoji] = users.filter((u: string) => u !== user.uid);
+        if (reactions[emoji].length === 0) delete reactions[emoji];
+      } else {
+        reactions[emoji] = [...users, user.uid];
+      }
+      await updateDoc(msgRef, { reactions });
+    } catch {}
+  };
+
   const insertEmoji = (emoji: string) => {
     const el = inputRef.current;
     if (!el) return;
@@ -385,27 +468,69 @@ export default function ChatScreen() {
         : `${typingUsers[0].name} and ${typingUsers.length - 1} others are typing...`;
 
   return (
-    <div className="flex flex-col h-dvh bg-black max-w-md mx-auto">
-      <header className="flex items-center gap-3 px-4 py-3 border-b border-[#333] shrink-0">
-        <button onClick={() => navigate('/')} className="text-[#007AFF] font-medium text-sm shrink-0">
-          &larr; Back
+    <div className="flex flex-col h-dvh max-w-md mx-auto" style={{ background: 'radial-gradient(ellipse at 50% 0%, #0a0a0f 0%, #000 70%)' }}>
+      <header className="flex items-center gap-3 px-4 py-3 border-b border-[#222] shrink-0 bg-black/50 backdrop-blur-sm">
+        <button onClick={() => navigate('/')} className="text-[#007AFF] font-medium text-sm shrink-0 hover:opacity-80 transition-opacity">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 inline-block -ml-1">
+            <path fillRule="evenodd" d="M17 10a.75.75 0 0 1-.75.75H5.612l4.158 3.96a.75.75 0 1 1-1.04 1.08l-5.5-5.25a.75.75 0 0 1 0-1.08l5.5-5.25a.75.75 0 1 1 1.04 1.08L5.612 9.25H16.25A.75.75 0 0 1 17 10Z" clipRule="evenodd" />
+          </svg>
         </button>
         <div className="flex-1 text-center min-w-0">
           <h1 className="text-sm font-bold truncate">
-            {code ? `Chat #${code}` : 'Chat'}
+            <span className="text-[#007AFF]">#</span>{code}
           </h1>
           {typingText ? (
-            <p className="text-xs text-[#00FF88] animate-pulse truncate">{typingText}</p>
+            <p className="text-xs text-[#00FF88] truncate flex items-center justify-center gap-1.5">
+              <span className="flex gap-0.5">
+                <span className="w-1 h-1 bg-[#00FF88] rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                <span className="w-1 h-1 bg-[#00FF88] rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                <span className="w-1 h-1 bg-[#00FF88] rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+              </span>
+              {typingText}
+            </p>
           ) : memberCount !== null ? (
-            <p className="text-xs text-[#B3B3B3]">{memberCount} member{memberCount !== 1 ? 's' : ''}</p>
+            <button onClick={() => setShowMembers(true)} className="text-xs text-[#555] hover:text-[#007AFF] transition-colors">
+              {memberCount} member{memberCount !== 1 ? 's' : ''}
+            </button>
           ) : null}
         </div>
+
+        {showMembers && (
+          <>
+            <div className="fixed inset-0 z-20 bg-black/60" onClick={() => setShowMembers(false)} />
+            <div className="fixed inset-0 z-30 flex items-center justify-center p-6 pointer-events-none" onClick={() => setShowMembers(false)}>
+              <div className="bg-[#1C1C1E] border border-[#333] rounded-2xl w-full max-w-xs shadow-2xl pointer-events-auto animate-fade-in" onClick={(e) => e.stopPropagation()}>
+                <div className="flex items-center justify-between px-4 py-3 border-b border-[#333]">
+                  <h2 className="text-sm font-bold">Members ({memberCount})</h2>
+                  <button onClick={() => setShowMembers(false)} className="text-[#555] hover:text-white p-1 rounded-lg hover:bg-white/5 transition-all">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4"><path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z" /></svg>
+                  </button>
+                </div>
+                <div className="max-h-60 overflow-y-auto p-2 space-y-0.5">
+                  {memberList.length === 0 ? (
+                    <p className="text-xs text-[#555] text-center py-4">No members</p>
+                  ) : (
+                    memberList.map((m) => (
+                      <div key={m.uid} className="flex items-center gap-2 px-3 py-2 rounded-lg">
+                        <div className="w-6 h-6 rounded-full bg-[#007AFF]/20 text-[#007AFF] text-[10px] font-bold flex items-center justify-center">
+                          {m.name.charAt(0).toUpperCase()}
+                        </div>
+                        <span className="text-sm text-[#ccc]">{m.name}</span>
+                        {m.uid === user?.uid && <span className="text-[10px] text-[#555] ml-auto">you</span>}
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            </div>
+          </>
+        )}
       </header>
 
-      <div className="flex-1 overflow-y-auto px-4 py-2 space-y-3">
+      <div ref={messagesRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-1 scroll-smooth">
         {loading && (
-          <div className="flex justify-center py-8">
-            <div className="w-6 h-6 border-2 border-[#333] border-t-[#007AFF] rounded-full animate-spin" />
+          <div className="flex justify-center py-12">
+            <div className="w-5 h-5 border-2 border-[#333] border-t-[#007AFF] rounded-full animate-spin" />
           </div>
         )}
 
@@ -413,90 +538,187 @@ export default function ChatScreen() {
           <button
             onClick={loadOlder}
             disabled={loadingOlder}
-            className="w-full text-xs text-[#B3B3B3] py-2 hover:text-white transition-colors disabled:opacity-40"
+            className="w-full text-xs text-[#555] py-3 hover:text-white transition-colors disabled:opacity-40"
           >
-            {loadingOlder ? 'Loading...' : 'Load older messages'}
+            {loadingOlder ? 'Loading...' : 'Load older'}
           </button>
         )}
 
         {!loading && messages.length === 0 && (
-          <div className="flex items-center justify-center h-full text-[#B3B3B3] text-sm">
-            No messages yet. Say hello!
+          <div className="flex flex-col items-center justify-center h-full text-[#444] text-sm gap-2">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-10 h-10 opacity-50">
+              <path d="M4.913 2.658c2.075-.27 4.19-.408 6.337-.408 2.147 0 4.262.139 6.337.408 1.922.25 3.291 1.861 3.405 3.727a4.403 4.403 0 0 0-1.032-.211 50.89 50.89 0 0 0-8.42 0c-2.358.196-4.04 2.19-4.04 4.434v4.286a4.47 4.47 0 0 0 2.433 3.984L7.28 21.53A.75.75 0 0 1 6 21v-4.03a48.527 48.527 0 0 1-1.087-.128C2.905 16.58 1.5 14.833 1.5 12.862V6.638c0-1.97 1.405-3.718 3.413-3.979Z" />
+              <path d="M15.75 7.5c-1.376 0-2.739.057-4.086.169C10.124 7.797 9 9.103 9 10.609v4.285c0 1.507 1.128 2.814 2.67 2.94 1.243.102 2.5.157 3.768.165l2.782 2.781a.75.75 0 0 0 1.28-.53v-2.39l.33-.026c1.542-.125 2.67-1.433 2.67-2.94v-4.286c0-1.505-1.125-2.811-2.664-2.94A49.392 49.392 0 0 0 15.75 7.5Z" />
+            </svg>
+            <span>No messages yet</span>
+            <span className="text-xs">Say something to start</span>
           </div>
         )}
 
         {messages.map((msg) => {
           const isOwn = msg.senderUid === user?.uid;
           const isImage = msg.type === 'image';
+          const menuOpen = menuMsgId === msg.id;
+          const reactingOpen = reactingMsgId === msg.id;
           return (
-            <div key={msg.id} className={`group flex flex-col ${isOwn ? 'items-end' : 'items-start'}`}>
-              <div className={`flex items-center gap-1.5 mb-1 ${isOwn ? 'flex-row-reverse' : 'flex-row'}`}>
-                {!isOwn && <Avatar name={msg.senderName} size="sm" />}
-                <span className="text-xs text-[#B3B3B3]">{msg.senderName}</span>
-                <span className="text-[10px] text-[#555]">{formatTime(msg.timestamp)}</span>
-                {msg.edited && <span className="text-[10px] text-[#666]">(edited)</span>}
-              </div>
-
-              {msg.replyTo && (
-                <div
-                  className={`text-xs px-3 py-1.5 rounded-t-lg border border-[#444] max-w-[75%] mb-0.5 ${
-                    isOwn ? 'rounded-bl-lg bg-[#0055BB]/30 mr-9' : 'rounded-br-lg bg-[#222] ml-9'
-                  }`}
-                >
-                  <span className="text-[#00FF88] font-medium">@{msg.replyTo.senderName}</span>
-                  <p className="text-[#999] truncate mt-0.5">{msg.replyTo.text}</p>
+            <div
+              key={msg.id}
+              className={`flex flex-col ${isOwn ? 'items-end' : 'items-start'} animate-fade-in`}
+              style={{ animationDelay: '0ms' }}
+            >
+              {!msg.deleted && (
+                <div className={`flex items-center gap-1.5 mb-0.5 ${isOwn ? 'flex-row-reverse' : 'flex-row'} px-1`}>
+                  {!isOwn && <Avatar name={msg.senderName} size="sm" />}
+                  <span className="text-[11px] text-[#555] font-medium">{msg.senderName}</span>
+                  <span className="text-[9px] text-[#333]">{formatTime(msg.timestamp)}</span>
+                  {msg.edited && <span className="text-[9px] text-[#444]">edited</span>}
                 </div>
               )}
 
-              <div className={`flex items-end gap-1.5 ${isOwn ? 'flex-row' : 'flex-row-reverse'}`}>
-                {isImage ? (
-                  <div
-                    className={`max-w-[75%] rounded-2xl overflow-hidden border border-[#333] ${
-                      isOwn ? 'rounded-br-md' : 'rounded-bl-md'
-                    }`}
-                  >
-                    <img
-                      src={msg.text}
-                      alt="Shared image"
-                      className="w-full h-auto max-h-72 object-cover"
-                      loading="lazy"
-                    />
-                  </div>
-                ) : (
-                  <div
-                    className={`max-w-[80%] px-4 py-2.5 rounded-2xl text-sm leading-relaxed break-words ${
-                      isOwn
-                        ? 'bg-[#007AFF] text-white rounded-br-md'
-                        : 'bg-[#1C1C1E] text-white rounded-bl-md'
-                    }`}
-                  >
-                    <MentionText text={msg.text} />
-                  </div>
-                )}
-                <div className="flex flex-col gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                  {isOwn && !isImage && (
-                    <button
-                      onClick={() => handleEdit(msg)}
-                      className="text-[#666] hover:text-[#007AFF] text-xs shrink-0"
-                      title="Edit"
-                    >
-                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
-                        <path d="m5.433 13.917 1.262-3.155A4 4 0 0 1 7.58 9.42l6.92-6.918a2.121 2.121 0 0 1 3 3l-6.92 6.918c-.383.383-.84.685-1.343.886l-3.154 1.262a.5.5 0 0 1-.65-.65Z" />
-                        <path d="M3.5 5.75c0-.69.56-1.25 1.25-1.25H10A.75.75 0 0 0 10 3H4.75A2.75 2.75 0 0 0 2 5.75v9.5A2.75 2.75 0 0 0 4.75 18h9.5A2.75 2.75 0 0 0 17 15.25V10a.75.75 0 0 0-1.5 0v5.25c0 .69-.56 1.25-1.25 1.25h-9.5c-.69 0-1.25-.56-1.25-1.25v-9.5Z" />
-                      </svg>
-                    </button>
-                  )}
-                  <button
-                    onClick={() => handleReply(msg)}
-                    className="text-[#666] hover:text-[#007AFF] text-xs shrink-0"
-                    title="Reply"
-                  >
-                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
-                      <path fillRule="evenodd" d="M3.43 2.524A41.29 41.29 0 0 1 10 2c2.236 0 4.43.18 6.57.524 1.437.231 2.43 1.49 2.43 2.902v5.148c0 1.413-.993 2.67-2.43 2.902a41.202 41.202 0 0 1-5.183.501.78.78 0 0 0-.528.224l-3.579 3.58A.75.75 0 0 1 6 17.25v-3.443a41.033 41.033 0 0 1-2.57-.33C1.993 13.244 1 11.986 1 10.573V5.426c0-1.413.993-2.67 2.43-2.902Z" clipRule="evenodd" />
-                    </svg>
-                  </button>
+              {msg.deleted ? (
+                <div className="max-w-[80%] px-3.5 py-2.5 rounded-2xl text-sm bg-[#111] text-[#555] italic border border-[#222]">
+                  Message deleted
                 </div>
-              </div>
+              ) : (
+                <>
+                  {msg.replyTo && (
+                    <div
+                      className={`text-xs px-3 py-1.5 rounded-xl border border-[#333]/50 max-w-[75%] mb-0.5 ${
+                        isOwn ? 'rounded-br-sm bg-[#0055BB]/20 mr-9' : 'rounded-bl-sm bg-[#222] ml-9'
+                      }`}
+                    >
+                      <span className="text-[#00FF88] text-[10px] font-medium">@{msg.replyTo.senderName}</span>
+                      <p className="text-[#777] text-[11px] truncate mt-0.5">{msg.replyTo.text}</p>
+                    </div>
+                  )}
+
+                  <div className={`flex items-end gap-1 ${isOwn ? 'flex-row' : 'flex-row-reverse'} relative`}>
+                    {isImage ? (
+                      <div
+                        className={`max-w-[72%] rounded-2xl overflow-hidden border border-[#333]/50 shadow-lg ${
+                          isOwn ? 'rounded-br-sm' : 'rounded-bl-sm'
+                        }`}
+                      >
+                        <img
+                          src={msg.text}
+                          alt="Shared image"
+                          className="w-full h-auto max-h-72 object-cover"
+                          loading="lazy"
+                        />
+                      </div>
+                    ) : (
+                      <div
+                        className={`max-w-[80%] px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed break-words shadow-sm ${
+                          isOwn
+                            ? 'bg-[#007AFF] text-white rounded-br-sm'
+                            : 'bg-[#1C1C1E] text-[#E5E5E5] rounded-bl-sm border border-[#2A2A2A]'
+                        }`}
+                      >
+                        <MentionText text={msg.text} />
+                      </div>
+                    )}
+
+                    {isOwn && !msg.deleted && (
+                      <button
+                        onClick={() => deleteMessage(msg.id)}
+                        className="text-[#444] hover:text-red-400 p-1 rounded-lg hover:bg-white/5 transition-all"
+                        title="Delete"
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5">
+                          <path fillRule="evenodd" d="M8.75 1A2.75 2.75 0 0 0 6 3.75v.443c-.795.077-1.584.176-2.365.298a.75.75 0 1 0 .23 1.482l.149-.022.841 10.518A2.75 2.75 0 0 0 7.596 19h4.807a2.75 2.75 0 0 0 2.742-2.53l.841-10.52.149.023a.75.75 0 0 0 .23-1.482A41.03 41.03 0 0 0 14 4.193V3.75A2.75 2.75 0 0 0 11.25 1h-2.5ZM10 4c-.84 0-1.673.025-2.5.075V3.75c0-.69.56-1.25 1.25-1.25h2.5c.69 0 1.25.56 1.25 1.25v.325C11.673 4.025 10.84 4 10 4ZM8.58 7.72a.75.75 0 0 0-1.5.06l.3 7.5a.75.75 0 1 0 1.5-.06l-.3-7.5Zm4.42.06a.75.75 0 0 0-1.5-.06l-.3 7.5a.75.75 0 1 0 1.5.06l.3-7.5Z" clipRule="evenodd" />
+                        </svg>
+                      </button>
+                    )}
+                    <div className="relative shrink-0">
+                      <button
+                        onClick={() => setMenuMsgId(menuOpen ? null : msg.id)}
+                        className="text-[#444] hover:text-white p-1 rounded-lg hover:bg-white/5 transition-all"
+                        title="More"
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+                          <path d="M10 3a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3ZM10 8.5a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3ZM10 14a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3Z" />
+                        </svg>
+                      </button>
+
+                      {menuOpen && (
+                        <>
+                          <div className="fixed inset-0 z-10" onClick={() => setMenuMsgId(null)} />
+                          <div className={`absolute z-20 min-w-[140px] bg-[#1C1C1E] border border-[#333] rounded-xl shadow-xl py-1 ${isOwn ? 'bottom-full right-0 mb-1' : 'bottom-full left-0 mb-1'}`}>
+                            <button
+                              onClick={() => { setMenuMsgId(null); handleReply(msg); }}
+                              className="w-full flex items-center gap-2 px-3 py-2 text-xs text-[#ccc] hover:bg-white/5 transition-colors"
+                            >
+                              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5"><path fillRule="evenodd" d="M3.43 2.524A41.29 41.29 0 0 1 10 2c2.236 0 4.43.18 6.57.524 1.437.231 2.43 1.49 2.43 2.902v5.148c0 1.413-.993 2.67-2.43 2.902a41.202 41.202 0 0 1-5.183.501.78.78 0 0 0-.528.224l-3.579 3.58A.75.75 0 0 1 6 17.25v-3.443a41.033 41.033 0 0 1-2.57-.33C1.993 13.244 1 11.986 1 10.573V5.426c0-1.413.993-2.67 2.43-2.902Z" clipRule="evenodd" /></svg>
+                              Reply
+                            </button>
+                            <button
+                              onClick={() => { setMenuMsgId(null); setReactingMsgId(reactingOpen ? null : msg.id); }}
+                              className="w-full flex items-center gap-2 px-3 py-2 text-xs text-[#ccc] hover:bg-white/5 transition-colors"
+                            >
+                              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5"><path d="M10.868 2.884c-.321-.772-1.415-.772-1.736 0l-1.83 4.401-4.753.381c-.833.067-1.171 1.107-.536 1.651l3.62 3.102-1.106 4.637c-.194.811.71 1.45 1.438 1.016l4.085-2.52 4.085 2.52c.728.434 1.632-.205 1.438-1.016l-1.106-4.637 3.62-3.102c.635-.544.297-1.584-.536-1.65l-4.752-.382-1.831-4.401Z" /></svg>
+                              React
+                            </button>
+                            {isOwn && (
+                              <button
+                                onClick={() => { setMenuMsgId(null); handleEdit(msg); }}
+                                className="w-full flex items-center gap-2 px-3 py-2 text-xs text-[#ccc] hover:bg-white/5 transition-colors"
+                              >
+                                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5"><path d="m5.433 13.917 1.262-3.155A4 4 0 0 1 7.58 9.42l6.92-6.918a2.121 2.121 0 0 1 3 3l-6.92 6.918c-.383.383-.84.685-1.343.886l-3.154 1.262a.5.5 0 0 1-.65-.65Z" /><path d="M3.5 5.75c0-.69.56-1.25 1.25-1.25H10A.75.75 0 0 0 10 3H4.75A2.75 2.75 0 0 0 2 5.75v9.5A2.75 2.75 0 0 0 4.75 18h9.5A2.75 2.75 0 0 0 17 15.25V10a.75.75 0 0 0-1.5 0v5.25c0 .69-.56 1.25-1.25 1.25h-9.5c-.69 0-1.25-.56-1.25-1.25v-9.5Z" /></svg>
+                                Edit
+                              </button>
+                            )}
+                            {isOwn && (
+                              <button
+                                onClick={() => deleteMessage(msg.id)}
+                                className="w-full flex items-center gap-2 px-3 py-2 text-xs text-red-400 hover:bg-white/5 transition-colors"
+                              >
+                                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5"><path fillRule="evenodd" d="M8.75 1A2.75 2.75 0 0 0 6 3.75v.443c-.795.077-1.584.176-2.365.298a.75.75 0 1 0 .23 1.482l.149-.022.841 10.518A2.75 2.75 0 0 0 7.596 19h4.807a2.75 2.75 0 0 0 2.742-2.53l.841-10.52.149.023a.75.75 0 0 0 .23-1.482A41.03 41.03 0 0 0 14 4.193V3.75A2.75 2.75 0 0 0 11.25 1h-2.5ZM10 4c-.84 0-1.673.025-2.5.075V3.75c0-.69.56-1.25 1.25-1.25h2.5c.69 0 1.25.56 1.25 1.25v.325C11.673 4.025 10.84 4 10 4ZM8.58 7.72a.75.75 0 0 0-1.5.06l.3 7.5a.75.75 0 1 0 1.5-.06l-.3-7.5Zm4.42.06a.75.75 0 0 0-1.5-.06l-.3 7.5a.75.75 0 1 0 1.5.06l.3-7.5Z" clipRule="evenodd" /></svg>
+                                Delete
+                              </button>
+                            )}
+                          </div>
+                        </>
+                      )}
+
+                      {reactingOpen && (
+                        <>
+                          <div className="fixed inset-0 z-10" onClick={() => setReactingMsgId(null)} />
+                          <div className={`absolute z-20 flex gap-1 p-2 bg-[#1C1C1E] border border-[#333] rounded-xl shadow-xl ${isOwn ? 'bottom-full right-0 mb-1' : 'bottom-full left-0 mb-1'}`}>
+                            {['😀','❤️','🔥','😂','👍','🎉','😢','😡'].map((emoji) => (
+                              <button
+                                key={emoji}
+                                onClick={() => { toggleReaction(msg.id, emoji); setReactingMsgId(null); }}
+                                className="text-lg hover:scale-125 transition-transform p-1"
+                              >
+                                {emoji}
+                              </button>
+                            ))}
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  </div>
+
+                  {msg.reactions && Object.keys(msg.reactions).length > 0 && (
+                    <div className={`flex flex-wrap gap-1 mt-1 ${isOwn ? 'justify-end' : 'justify-start'} px-1`}>
+                      {Object.entries(msg.reactions).map(([emoji, uids]) => (
+                        <button
+                          key={emoji}
+                          onClick={() => toggleReaction(msg.id, emoji)}
+                          className={`text-[11px] flex items-center gap-1 px-1.5 py-0.5 rounded-full border transition-colors ${
+                            uids.includes(user?.uid || '')
+                              ? 'bg-[#007AFF]/20 border-[#007AFF]/40 text-white'
+                              : 'bg-[#1C1C1E] border-[#333] text-[#999] hover:bg-[#252525]'
+                          }`}
+                        >
+                          <span>{emoji}</span>
+                          <span>{uids.length}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
             </div>
           );
         })}
@@ -504,11 +726,12 @@ export default function ChatScreen() {
       </div>
 
       {editingId && (
-        <div className="px-4 py-2 bg-[#0D0D0D] border-t border-[#333] flex items-center gap-2">
+        <div className="px-4 py-2 bg-[#0D0D0D] border-t border-[#222] flex items-center gap-2 animate-fade-in">
+          <div className="w-1 h-8 rounded-full bg-[#007AFF] shrink-0" />
           <div className="flex-1 min-w-0">
-            <span className="text-xs text-[#007AFF] font-medium">Editing message</span>
+            <span className="text-[11px] text-[#007AFF] font-medium">Editing message</span>
           </div>
-          <button onClick={cancelEdit} className="text-[#666] hover:text-white shrink-0">
+          <button onClick={cancelEdit} className="text-[#555] hover:text-white p-1 rounded-lg hover:bg-white/5 transition-all shrink-0">
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
               <path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z" />
             </svg>
@@ -517,12 +740,13 @@ export default function ChatScreen() {
       )}
 
       {replyTo && !editingId && (
-        <div className="px-4 py-2 bg-[#0D0D0D] border-t border-[#333] flex items-center gap-2">
+        <div className="px-4 py-2 bg-[#0D0D0D] border-t border-[#222] flex items-center gap-2 animate-fade-in">
+          <div className="w-1 h-8 rounded-full bg-[#00FF88] shrink-0" />
           <div className="flex-1 min-w-0">
-            <span className="text-xs text-[#00FF88] font-medium">@{replyTo.senderName}</span>
-            <p className="text-xs text-[#666] truncate">{replyTo.text}</p>
+            <span className="text-[11px] text-[#00FF88] font-medium">@{replyTo.senderName}</span>
+            <p className="text-[11px] text-[#555] truncate mt-0.5">{replyTo.text}</p>
           </div>
-          <button onClick={cancelReply} className="text-[#666] hover:text-white shrink-0">
+          <button onClick={cancelReply} className="text-[#555] hover:text-white p-1 rounded-lg hover:bg-white/5 transition-all shrink-0">
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
               <path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z" />
             </svg>
@@ -530,7 +754,7 @@ export default function ChatScreen() {
         </div>
       )}
 
-      <div className="px-4 py-3 border-t border-[#333] shrink-0 relative">
+      <div className="px-4 py-3 border-t border-[#222] shrink-0 relative bg-black/50 backdrop-blur-sm">
         {mentionStartIndex !== -1 && mentionQuery !== undefined && (
           <MentionDropdown
             query={mentionQuery}
@@ -547,10 +771,10 @@ export default function ChatScreen() {
             onClose={() => setShowEmojiPicker(false)}
           />
         )}
-        <div className="flex items-center gap-2 bg-[#1C1C1E] rounded-full px-4 py-2 border border-[#2C2C2E]">
+        <div className="flex items-center gap-1.5 bg-[#1C1C1E] rounded-2xl px-3 py-2 border border-[#2A2A2A] focus-within:border-[#444] transition-colors">
           <button
             onClick={() => setShowEmojiPicker(!showEmojiPicker)}
-            className="text-[#666] hover:text-white shrink-0 transition-colors"
+            className="text-[#555] hover:text-white shrink-0 transition-colors p-1 rounded-lg hover:bg-white/5"
             title="Emoji"
           >
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
@@ -559,7 +783,7 @@ export default function ChatScreen() {
           </button>
           <button
             onClick={() => fileInputRef.current?.click()}
-            className="text-[#666] hover:text-white shrink-0 transition-colors"
+            className="text-[#555] hover:text-white shrink-0 transition-colors p-1 rounded-lg hover:bg-white/5"
             title="Attach image"
             disabled={sending}
           >
@@ -611,13 +835,13 @@ export default function ChatScreen() {
               }
             }}
             placeholder={editingId ? 'Edit message...' : replyTo ? 'Write a reply...' : 'Message'}
-            className="flex-1 bg-transparent text-white placeholder-gray-500 outline-none text-sm"
+            className="flex-1 bg-transparent text-white placeholder-[#444] outline-none text-sm"
             maxLength={2000}
           />
           <button
             onClick={sendMessage}
             disabled={!input.trim() || sending || !cryptoKey}
-            className="text-[#007AFF] disabled:opacity-30 transition-opacity"
+            className="text-[#007AFF] disabled:opacity-20 transition-all p-1 rounded-lg hover:bg-[#007AFF]/10 disabled:cursor-not-allowed"
           >
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
               <path d="M3.478 2.404a.75.75 0 0 0-.926.941l2.432 7.905H13.5a.75.75 0 0 1 0 1.5H4.984l-2.432 7.905a.75.75 0 0 0 .926.94 60.519 60.519 0 0 0 18.445-8.986.75.75 0 0 0 0-1.218A60.517 60.517 0 0 0 3.478 2.404Z" />
@@ -668,6 +892,8 @@ async function decryptMessage(data: any, id: string, key: CryptoKey): Promise<De
       type: parsed.type || 'text',
       replyTo: parsed.replyTo || undefined,
       edited: data.edited || false,
+      deleted: data.deleted || false,
+      reactions: data.reactions || undefined,
       timestamp: data.timestamp?.toMillis() ?? Date.now(),
     };
   } catch {
