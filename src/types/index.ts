@@ -33,6 +33,7 @@ export interface DecryptedMessage {
   edited?: boolean;
   deleted?: boolean;
   reactions?: Record<string, string[]>;
+  seq?: number;
   timestamp: number;
 }
 

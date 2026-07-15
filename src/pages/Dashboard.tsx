@@ -180,6 +180,7 @@ export default function Dashboard() {
         text: text.slice(0, 40),
         timestamp: data.timestamp?.toMillis() ?? Date.now(),
         senderUid: data.senderUid,
+        senderName: data.senderName || data.senderUid?.slice(0, 6),
       };
     } catch {
       return null;
@@ -282,16 +283,17 @@ export default function Dashboard() {
       )}
 
       {joinedRooms.length > 0 && (
-        <div className="w-full mt-12 animate-fade-in">
-          <div className="flex items-center justify-between mb-3 px-1">
-            <h2 className="text-[11px] font-semibold text-[#444] uppercase tracking-[0.15em]">
+        <div className="w-full mt-10 animate-fade-in">
+          <div className="flex items-center gap-2 mb-3 px-1">
+            <div className="h-3 w-0.5 rounded-full bg-[#007AFF]" />
+            <h2 className="text-[11px] font-semibold text-[#555] uppercase tracking-[0.15em]">
               Your Rooms
             </h2>
-            <span className="text-[10px] text-[#333] font-mono">
-              {joinedRooms.length} room{joinedRooms.length !== 1 ? 's' : ''}
+            <span className="text-[10px] text-[#333] font-mono ml-auto">
+              {joinedRooms.length}
             </span>
           </div>
-          <div className="space-y-2">
+          <div className="space-y-1">
             {[...joinedRooms].reverse().map((room) => (
               <RoomItem
                 key={room.code}
@@ -314,9 +316,9 @@ function RoomItem({
 }: {
   room: JoinedRoom;
   onEnter: () => void;
-  getLastMessage: (code: string) => Promise<{ text: string; timestamp: number; senderUid: string } | null>;
+  getLastMessage: (code: string) => Promise<{ text: string; timestamp: number; senderUid: string; senderName: string } | null>;
 }) {
-  const [preview, setPreview] = useState<{ text: string; timestamp: number; senderUid: string } | null>(null);
+  const [preview, setPreview] = useState<{ text: string; timestamp: number; senderUid: string; senderName: string } | null>(null);
   const { user } = useStore();
 
   useEffect(() => {
@@ -348,28 +350,30 @@ function RoomItem({
   return (
     <button
       onClick={onEnter}
-      className="w-full flex items-center gap-4 p-4 rounded-2xl border border-[#222] bg-[#0D0D0D] text-left hover:bg-[#141414] hover:border-[#444] transition-all active:scale-[0.98] group"
+      className="w-full flex items-center gap-3 p-3 rounded-2xl border border-[#222] bg-[#0D0D0D] text-left hover:bg-[#141414] hover:border-[#333] transition-all active:scale-[0.98] group"
     >
       <div
-        className="w-12 h-12 rounded-2xl flex items-center justify-center font-bold text-white text-sm shrink-0 shadow-lg"
+        className="w-11 h-11 rounded-xl flex items-center justify-center font-bold text-white text-xs shrink-0 shadow-lg"
         style={{ background: roomGradient(room.code) }}
       >
-        #{room.code}
+        {room.code}
       </div>
       <div className="flex-1 min-w-0">
         <div className="flex items-center justify-between gap-2">
-          <p className="text-sm font-semibold text-white">Room #{room.code}</p>
+          <p className="text-sm font-semibold text-white truncate">
+            Room <span className="font-mono text-[#007AFF]">#{room.code}</span>
+          </p>
           {preview && (
             <span className="text-[10px] text-[#555] shrink-0 font-medium">
               {formatTime(preview.timestamp)}
             </span>
           )}
         </div>
-        <p className="text-xs text-[#666] truncate mt-1 flex items-center gap-1">
+        <p className="text-xs text-[#666] truncate mt-0.5 flex items-center gap-1">
           {preview ? (
             <>
-              <span className={preview.senderUid === user?.uid ? 'text-[#007AFF]' : 'text-[#00FF88]'}>
-                {preview.senderUid === user?.uid ? 'You' : preview.senderUid?.slice(0, 6)}
+              <span className={`${preview.senderUid === user?.uid ? 'text-[#007AFF]' : 'text-[#00FF88]'} font-medium`}>
+                {preview.senderUid === user?.uid ? 'You' : preview.senderName}
               </span>
               <span className="text-[#444]">&middot;</span>
               <span>{preview.text}</span>
@@ -379,7 +383,9 @@ function RoomItem({
           )}
         </p>
       </div>
-      <div className="w-2 h-2 rounded-full bg-[#007AFF] opacity-0 group-hover:opacity-100 transition-opacity shrink-0" />
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 text-[#333] group-hover:text-[#555] transition-colors shrink-0">
+        <path fillRule="evenodd" d="M7.21 14.77a.75.75 0 0 1 .02-1.06L11.168 10 7.23 6.29a.75.75 0 1 1 1.04-1.08l4.5 4.25a.75.75 0 0 1 0 1.08l-4.5 4.25a.75.75 0 0 1-1.06-.02Z" clipRule="evenodd" />
+      </svg>
     </button>
   );
 }
