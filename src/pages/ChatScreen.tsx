@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, memo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
   collection,
@@ -129,7 +129,6 @@ export default function ChatScreen() {
 
     const q = query(
       collection(db, 'rooms', code, 'messages'),
-      orderBy('timestamp', 'desc'),
       orderBy('seq', 'desc'),
       limit(PAGE_SIZE)
     );
@@ -179,23 +178,22 @@ export default function ChatScreen() {
           setMessages(decrypted.reverse());
           setLoading(false);
         } else {
-          // Subsequent snapshots: merge changes, then re-sort by timestamp
+          // Subsequent snapshots: merge changes, then re-sort by seq
           const changes = snap.docChanges().filter(c => c.type === 'added' || c.type === 'modified');
-          if (changes.length > 0) {
-            const updatedMsgs = await Promise.all(
-              changes.map(c => decryptMessage(c.doc.data(), c.doc.id, cryptoKey))
-            );
-            setMessages((prev) => {
-              const merged = [...prev];
-              for (const msg of updatedMsgs) {
-                const idx = merged.findIndex((m) => m.id === msg.id);
-                if (idx >= 0) merged[idx] = msg;
-                else merged.push(msg);
-              }
-              merged.sort((a, b) => (a.seq ?? a.timestamp) - (b.seq ?? b.timestamp));
-              return merged;
-            });
-          }
+          if (changes.length === 0) return;
+          const updatedMsgs = await Promise.all(
+            changes.map(c => decryptMessage(c.doc.data(), c.doc.id, cryptoKey))
+          );
+          setMessages((prev) => {
+            const merged = [...prev];
+            for (const msg of updatedMsgs) {
+              const idx = merged.findIndex((m) => m.id === msg.id);
+              if (idx >= 0) merged[idx] = msg;
+              else merged.push(msg);
+            }
+            merged.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
+            return merged;
+          });
         }
       },
       () => setLoading(false)
@@ -523,7 +521,7 @@ export default function ChatScreen() {
         )}
       </header>
 
-      <div ref={messagesRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-1 scroll-smooth">
+      <div ref={messagesRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-1 scroll-smooth will-change-scroll">
         {loading && (
           <div className="flex justify-center py-12">
             <div className="w-5 h-5 border-2 border-[#333] border-t-[#007AFF] rounded-full animate-spin" />
@@ -551,172 +549,23 @@ export default function ChatScreen() {
           </div>
         )}
 
-        {messages.map((msg) => {
-          const isOwn = msg.senderUid === user?.uid;
-          const isImage = msg.type === 'image';
-          const menuOpen = menuMsgId === msg.id;
-          const reactingOpen = reactingMsgId === msg.id;
-          return (
-            <div
-              key={msg.id}
-              className={`flex flex-col ${isOwn ? 'items-end' : 'items-start'} animate-fade-in`}
-              style={{ animationDelay: '0ms' }}
-            >
-              {!msg.deleted && (
-                <div className={`flex items-center gap-1.5 mb-0.5 ${isOwn ? 'flex-row-reverse' : 'flex-row'} px-1`}>
-                  {!isOwn && <Avatar name={msg.senderName} size="sm" />}
-                  <span className="text-[11px] text-[#555] font-medium">{msg.senderName}</span>
-                  <span className="text-[9px] text-[#333]">{formatTime(msg.timestamp)}</span>
-                  {msg.edited && <span className="text-[9px] text-[#444]">edited</span>}
-                </div>
-              )}
-
-              {msg.deleted ? (
-                <div className="max-w-[80%] px-3.5 py-2.5 rounded-2xl text-sm bg-[#111] text-[#555] italic border border-[#222]">
-                  Message deleted
-                </div>
-              ) : (
-                <>
-                  {msg.replyTo && (
-                    <div
-                      className={`text-xs px-3 py-1.5 rounded-xl border border-[#333]/50 max-w-[75%] mb-0.5 ${
-                        isOwn ? 'rounded-br-sm bg-[#0055BB]/20 mr-9' : 'rounded-bl-sm bg-[#222] ml-9'
-                      }`}
-                    >
-                      <span className="text-[#00FF88] text-[10px] font-medium">@{msg.replyTo.senderName}</span>
-                      <p className="text-[#777] text-[11px] truncate mt-0.5">{msg.replyTo.text}</p>
-                    </div>
-                  )}
-
-                  <div className={`flex gap-1 ${isOwn ? 'flex-row' : 'flex-row-reverse'}`}>
-                    {isImage ? (
-                      <div
-                        className={`max-w-[72%] rounded-2xl overflow-hidden border border-[#333]/50 shadow-lg ${
-                          isOwn ? 'rounded-br-sm' : 'rounded-bl-sm'
-                        }`}
-                      >
-                        <img
-                          src={msg.text}
-                          alt="Shared image"
-                          className="w-full h-auto max-h-72 object-cover"
-                          loading="lazy"
-                        />
-                      </div>
-                    ) : (
-                      <div
-                        className={`max-w-[80%] px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed break-words shadow-sm ${
-                          isOwn
-                            ? 'bg-[#007AFF] text-white rounded-br-sm'
-                            : 'bg-[#1C1C1E] text-[#E5E5E5] rounded-bl-sm border border-[#2A2A2A]'
-                        }`}
-                      >
-                        <MentionText text={msg.text} />
-                      </div>
-                    )}
-                    <div className="flex flex-col gap-0.5 pt-1 shrink-0">
-                      {isOwn && !msg.deleted && (
-                        <button
-                          onClick={() => deleteMessage(msg.id)}
-                          className="text-[#444] hover:text-red-400 p-1 rounded-lg hover:bg-white/5 transition-all"
-                          title="Delete"
-                        >
-                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5">
-                            <path fillRule="evenodd" d="M8.75 1A2.75 2.75 0 0 0 6 3.75v.443c-.795.077-1.584.176-2.365.298a.75.75 0 1 0 .23 1.482l.149-.022.841 10.518A2.75 2.75 0 0 0 7.596 19h4.807a2.75 2.75 0 0 0 2.742-2.53l.841-10.52.149.023a.75.75 0 0 0 .23-1.482A41.03 41.03 0 0 0 14 4.193V3.75A2.75 2.75 0 0 0 11.25 1h-2.5ZM10 4c-.84 0-1.673.025-2.5.075V3.75c0-.69.56-1.25 1.25-1.25h2.5c.69 0 1.25.56 1.25 1.25v.325C11.673 4.025 10.84 4 10 4ZM8.58 7.72a.75.75 0 0 0-1.5.06l.3 7.5a.75.75 0 1 0 1.5-.06l-.3-7.5Zm4.42.06a.75.75 0 0 0-1.5-.06l-.3 7.5a.75.75 0 1 0 1.5.06l.3-7.5Z" clipRule="evenodd" />
-                          </svg>
-                        </button>
-                      )}
-                      <div className="relative shrink-0">
-                        <button
-                          onClick={() => setMenuMsgId(menuOpen ? null : msg.id)}
-                          className="text-[#444] hover:text-white p-1 rounded-lg hover:bg-white/5 transition-all"
-                          title="More"
-                        >
-                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
-                            <path d="M10 3a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3ZM10 8.5a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3ZM10 14a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3Z" />
-                          </svg>
-                        </button>
-                        {menuOpen && (
-                          <>
-                            <div className="fixed inset-0 z-10" onClick={() => setMenuMsgId(null)} />
-                            <div className={`absolute z-20 min-w-[140px] bg-[#1C1C1E] border border-[#333] rounded-xl shadow-xl py-1 ${isOwn ? 'bottom-full right-0 mb-1' : 'bottom-full left-0 mb-1'}`}>
-                              <button
-                                onClick={() => { setMenuMsgId(null); handleReply(msg); }}
-                                className="w-full flex items-center gap-2 px-3 py-2 text-xs text-[#ccc] hover:bg-white/5 transition-colors"
-                              >
-                                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5"><path fillRule="evenodd" d="M3.43 2.524A41.29 41.29 0 0 1 10 2c2.236 0 4.43.18 6.57.524 1.437.231 2.43 1.49 2.43 2.902v5.148c0 1.413-.993 2.67-2.43 2.902a41.202 41.202 0 0 1-5.183.501.78.78 0 0 0-.528.224l-3.579 3.58A.75.75 0 0 1 6 17.25v-3.443a41.033 41.033 0 0 1-2.57-.33C1.993 13.244 1 11.986 1 10.573V5.426c0-1.413.993-2.67 2.43-2.902Z" clipRule="evenodd" /></svg>
-                                Reply
-                              </button>
-                              <button
-                                onClick={() => { setMenuMsgId(null); setReactingMsgId(reactingOpen ? null : msg.id); }}
-                                className="w-full flex items-center gap-2 px-3 py-2 text-xs text-[#ccc] hover:bg-white/5 transition-colors"
-                              >
-                                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5"><path d="M10.868 2.884c-.321-.772-1.415-.772-1.736 0l-1.83 4.401-4.753.381c-.833.067-1.171 1.107-.536 1.651l3.62 3.102-1.106 4.637c-.194.811.71 1.45 1.438 1.016l4.085-2.52 4.085 2.52c.728.434 1.632-.205 1.438-1.016l-1.106-4.637 3.62-3.102c.635-.544.297-1.584-.536-1.65l-4.752-.382-1.831-4.401Z" /></svg>
-                                React
-                              </button>
-                              {isOwn && (
-                                <button
-                                  onClick={() => { setMenuMsgId(null); handleEdit(msg); }}
-                                  className="w-full flex items-center gap-2 px-3 py-2 text-xs text-[#ccc] hover:bg-white/5 transition-colors"
-                                >
-                                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5"><path d="m5.433 13.917 1.262-3.155A4 4 0 0 1 7.58 9.42l6.92-6.918a2.121 2.121 0 0 1 3 3l-6.92 6.918c-.383.383-.84.685-1.343.886l-3.154 1.262a.5.5 0 0 1-.65-.65Z" /><path d="M3.5 5.75c0-.69.56-1.25 1.25-1.25H10A.75.75 0 0 0 10 3H4.75A2.75 2.75 0 0 0 2 5.75v9.5A2.75 2.75 0 0 0 4.75 18h9.5A2.75 2.75 0 0 0 17 15.25V10a.75.75 0 0 0-1.5 0v5.25c0 .69-.56 1.25-1.25 1.25h-9.5c-.69 0-1.25-.56-1.25-1.25v-9.5Z" /></svg>
-                                  Edit
-                                </button>
-                              )}
-                              {isOwn && (
-                                <button
-                                  onClick={() => deleteMessage(msg.id)}
-                                  className="w-full flex items-center gap-2 px-3 py-2 text-xs text-red-400 hover:bg-white/5 transition-colors"
-                                >
-                                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5"><path fillRule="evenodd" d="M8.75 1A2.75 2.75 0 0 0 6 3.75v.443c-.795.077-1.584.176-2.365.298a.75.75 0 1 0 .23 1.482l.149-.022.841 10.518A2.75 2.75 0 0 0 7.596 19h4.807a2.75 2.75 0 0 0 2.742-2.53l.841-10.52.149.023a.75.75 0 0 0 .23-1.482A41.03 41.03 0 0 0 14 4.193V3.75A2.75 2.75 0 0 0 11.25 1h-2.5ZM10 4c-.84 0-1.673.025-2.5.075V3.75c0-.69.56-1.25 1.25-1.25h2.5c.69 0 1.25.56 1.25 1.25v.325C11.673 4.025 10.84 4 10 4ZM8.58 7.72a.75.75 0 0 0-1.5.06l.3 7.5a.75.75 0 1 0 1.5-.06l-.3-7.5Zm4.42.06a.75.75 0 0 0-1.5-.06l-.3 7.5a.75.75 0 1 0 1.5.06l.3-7.5Z" clipRule="evenodd" /></svg>
-                                  Delete
-                                </button>
-                              )}
-                            </div>
-                          </>
-                        )}
-                        {reactingOpen && (
-                          <>
-                            <div className="fixed inset-0 z-10" onClick={() => setReactingMsgId(null)} />
-                            <div className={`absolute z-20 flex gap-1 p-2 bg-[#1C1C1E] border border-[#333] rounded-xl shadow-xl ${isOwn ? 'bottom-full right-0 mb-1' : 'bottom-full left-0 mb-1'}`}>
-                              {['😀','❤️','🔥','😂','👍','🎉','😢','😡'].map((emoji) => (
-                                <button
-                                  key={emoji}
-                                  onClick={() => { toggleReaction(msg.id, emoji); setReactingMsgId(null); }}
-                                  className="text-lg hover:scale-125 transition-transform p-1"
-                                >
-                                  {emoji}
-                                </button>
-                              ))}
-                            </div>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-
-                  {msg.reactions && Object.keys(msg.reactions).length > 0 && (
-                    <div className={`flex flex-wrap gap-1 mt-1 ${isOwn ? 'justify-end' : 'justify-start'} px-1`}>
-                      {Object.entries(msg.reactions).map(([emoji, uids]) => (
-                        <button
-                          key={emoji}
-                          onClick={() => toggleReaction(msg.id, emoji)}
-                          className={`text-[11px] flex items-center gap-1 px-1.5 py-0.5 rounded-full border transition-colors ${
-                            uids.includes(user?.uid || '')
-                              ? 'bg-[#007AFF]/20 border-[#007AFF]/40 text-white'
-                              : 'bg-[#1C1C1E] border-[#333] text-[#999] hover:bg-[#252525]'
-                          }`}
-                        >
-                          <span>{emoji}</span>
-                          <span>{uids.length}</span>
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </>
-              )}
-            </div>
-          );
-        })}
+        {messages.map((msg) => (
+          <MessageItem
+            key={msg.id}
+            msg={msg}
+            isOwn={msg.senderUid === user?.uid}
+            menuOpen={menuMsgId === msg.id}
+            reactingOpen={reactingMsgId === msg.id}
+            userUid={user?.uid}
+            formatTime={formatTime}
+            onReply={handleReply}
+            onEdit={handleEdit}
+            onDelete={deleteMessage}
+            onToggleReaction={toggleReaction}
+            onMenuOpen={setMenuMsgId}
+            onReactingOpen={setReactingMsgId}
+          />
+        ))}
         <div ref={bottomRef} />
       </div>
 
@@ -949,6 +798,192 @@ function MentionDropdown({
     </div>
   );
 }
+
+const MessageItem = memo(function MessageItem({
+  msg,
+  isOwn,
+  menuOpen,
+  reactingOpen,
+  userUid,
+  formatTime,
+  onReply,
+  onEdit,
+  onDelete,
+  onToggleReaction,
+  onMenuOpen,
+  onReactingOpen,
+}: {
+  msg: DecryptedMessage;
+  isOwn: boolean;
+  menuOpen: boolean;
+  reactingOpen: boolean;
+  userUid?: string;
+  formatTime: (ts: number) => string;
+  onReply: (msg: DecryptedMessage) => void;
+  onEdit: (msg: DecryptedMessage) => void;
+  onDelete: (msgId: string) => void;
+  onToggleReaction: (msgId: string, emoji: string) => void;
+  onMenuOpen: (id: string | null) => void;
+  onReactingOpen: (id: string | null) => void;
+}) {
+  const isImage = msg.type === 'image';
+  return (
+    <div className={`flex flex-col ${isOwn ? 'items-end' : 'items-start'}`}>
+      {!msg.deleted && (
+        <div className={`flex items-center gap-1.5 mb-0.5 ${isOwn ? 'flex-row-reverse' : 'flex-row'} px-1`}>
+          {!isOwn && <Avatar name={msg.senderName} size="sm" />}
+          <span className="text-[11px] text-[#555] font-medium">{msg.senderName}</span>
+          <span className="text-[9px] text-[#333]">{formatTime(msg.timestamp)}</span>
+          {msg.edited && <span className="text-[9px] text-[#444]">edited</span>}
+        </div>
+      )}
+
+      {msg.deleted ? (
+        <div className="max-w-[80%] px-3.5 py-2.5 rounded-2xl text-sm bg-[#111] text-[#555] italic border border-[#222]">
+          Message deleted
+        </div>
+      ) : (
+        <>
+          {msg.replyTo && (
+            <div
+              className={`text-xs px-3 py-1.5 rounded-xl border border-[#333]/50 max-w-[75%] mb-0.5 ${
+                isOwn ? 'rounded-br-sm bg-[#0055BB]/20 mr-9' : 'rounded-bl-sm bg-[#222] ml-9'
+              }`}
+            >
+              <span className="text-[#00FF88] text-[10px] font-medium">@{msg.replyTo.senderName}</span>
+              <p className="text-[#777] text-[11px] truncate mt-0.5">{msg.replyTo.text}</p>
+            </div>
+          )}
+
+          <div className={`flex gap-1 ${isOwn ? 'flex-row' : 'flex-row-reverse'}`}>
+            {isImage ? (
+              <div
+                className={`max-w-[72%] rounded-2xl overflow-hidden border border-[#333]/50 shadow-lg ${
+                  isOwn ? 'rounded-br-sm' : 'rounded-bl-sm'
+                }`}
+              >
+                <img
+                  src={msg.text}
+                  alt="Shared image"
+                  className="w-full h-auto max-h-72 object-cover"
+                  loading="lazy"
+                />
+              </div>
+            ) : (
+              <div
+                className={`max-w-[80%] px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed break-words shadow-sm ${
+                  isOwn
+                    ? 'bg-[#007AFF] text-white rounded-br-sm'
+                    : 'bg-[#1C1C1E] text-[#E5E5E5] rounded-bl-sm border border-[#2A2A2A]'
+                }`}
+              >
+                <MentionText text={msg.text} />
+              </div>
+            )}
+            <div className="flex flex-col gap-0.5 pt-1 shrink-0">
+              {isOwn && !msg.deleted && (
+                <button
+                  onClick={() => onDelete(msg.id)}
+                  className="text-[#444] hover:text-red-400 p-1 rounded-lg hover:bg-white/5 transition-all"
+                  title="Delete"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5">
+                    <path fillRule="evenodd" d="M8.75 1A2.75 2.75 0 0 0 6 3.75v.443c-.795.077-1.584.176-2.365.298a.75.75 0 1 0 .23 1.482l.149-.022.841 10.518A2.75 2.75 0 0 0 7.596 19h4.807a2.75 2.75 0 0 0 2.742-2.53l.841-10.52.149.023a.75.75 0 0 0 .23-1.482A41.03 41.03 0 0 0 14 4.193V3.75A2.75 2.75 0 0 0 11.25 1h-2.5ZM10 4c-.84 0-1.673.025-2.5.075V3.75c0-.69.56-1.25 1.25-1.25h2.5c.69 0 1.25.56 1.25 1.25v.325C11.673 4.025 10.84 4 10 4ZM8.58 7.72a.75.75 0 0 0-1.5.06l.3 7.5a.75.75 0 1 0 1.5-.06l-.3-7.5Zm4.42.06a.75.75 0 0 0-1.5-.06l-.3 7.5a.75.75 0 1 0 1.5.06l.3-7.5Z" clipRule="evenodd" />
+                  </svg>
+                </button>
+              )}
+              <div className="relative shrink-0">
+                <button
+                  onClick={() => onMenuOpen(menuOpen ? null : msg.id)}
+                  className="text-[#444] hover:text-white p-1 rounded-lg hover:bg-white/5 transition-all"
+                  title="More"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+                    <path d="M10 3a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3ZM10 8.5a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3ZM10 14a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3Z" />
+                  </svg>
+                </button>
+                {menuOpen && (
+                  <>
+                    <div className="fixed inset-0 z-10" onClick={() => onMenuOpen(null)} />
+                    <div className={`absolute z-20 min-w-[140px] bg-[#1C1C1E] border border-[#333] rounded-xl shadow-xl py-1 ${isOwn ? 'bottom-full right-0 mb-1' : 'bottom-full left-0 mb-1'}`}>
+                      <button
+                        onClick={() => { onMenuOpen(null); onReply(msg); }}
+                        className="w-full flex items-center gap-2 px-3 py-2 text-xs text-[#ccc] hover:bg-white/5 transition-colors"
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5"><path fillRule="evenodd" d="M3.43 2.524A41.29 41.29 0 0 1 10 2c2.236 0 4.43.18 6.57.524 1.437.231 2.43 1.49 2.43 2.902v5.148c0 1.413-.993 2.67-2.43 2.902a41.202 41.202 0 0 1-5.183.501.78.78 0 0 0-.528.224l-3.579 3.58A.75.75 0 0 1 6 17.25v-3.443a41.033 41.033 0 0 1-2.57-.33C1.993 13.244 1 11.986 1 10.573V5.426c0-1.413.993-2.67 2.43-2.902Z" clipRule="evenodd" /></svg>
+                        Reply
+                      </button>
+                      <button
+                        onClick={() => { onMenuOpen(null); onReactingOpen(reactingOpen ? null : msg.id); }}
+                        className="w-full flex items-center gap-2 px-3 py-2 text-xs text-[#ccc] hover:bg-white/5 transition-colors"
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5"><path d="M10.868 2.884c-.321-.772-1.415-.772-1.736 0l-1.83 4.401-4.753.381c-.833.067-1.171 1.107-.536 1.651l3.62 3.102-1.106 4.637c-.194.811.71 1.45 1.438 1.016l4.085-2.52 4.085 2.52c.728.434 1.632-.205 1.438-1.016l-1.106-4.637 3.62-3.102c.635-.544.297-1.584-.536-1.65l-4.752-.382-1.831-4.401Z" /></svg>
+                        React
+                      </button>
+                      {isOwn && (
+                        <button
+                          onClick={() => { onMenuOpen(null); onEdit(msg); }}
+                          className="w-full flex items-center gap-2 px-3 py-2 text-xs text-[#ccc] hover:bg-white/5 transition-colors"
+                        >
+                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5"><path d="m5.433 13.917 1.262-3.155A4 4 0 0 1 7.58 9.42l6.92-6.918a2.121 2.121 0 0 1 3 3l-6.92 6.918c-.383.383-.84.685-1.343.886l-3.154 1.262a.5.5 0 0 1-.65-.65Z" /><path d="M3.5 5.75c0-.69.56-1.25 1.25-1.25H10A.75.75 0 0 0 10 3H4.75A2.75 2.75 0 0 0 2 5.75v9.5A2.75 2.75 0 0 0 4.75 18h9.5A2.75 2.75 0 0 0 17 15.25V10a.75.75 0 0 0-1.5 0v5.25c0 .69-.56 1.25-1.25 1.25h-9.5c-.69 0-1.25-.56-1.25-1.25v-9.5Z" /></svg>
+                          Edit
+                        </button>
+                      )}
+                      {isOwn && (
+                        <button
+                          onClick={() => onDelete(msg.id)}
+                          className="w-full flex items-center gap-2 px-3 py-2 text-xs text-red-400 hover:bg-white/5 transition-colors"
+                        >
+                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5"><path fillRule="evenodd" d="M8.75 1A2.75 2.75 0 0 0 6 3.75v.443c-.795.077-1.584.176-2.365.298a.75.75 0 1 0 .23 1.482l.149-.022.841 10.518A2.75 2.75 0 0 0 7.596 19h4.807a2.75 2.75 0 0 0 2.742-2.53l.841-10.52.149.023a.75.75 0 0 0 .23-1.482A41.03 41.03 0 0 0 14 4.193V3.75A2.75 2.75 0 0 0 11.25 1h-2.5ZM10 4c-.84 0-1.673.025-2.5.075V3.75c0-.69.56-1.25 1.25-1.25h2.5c.69 0 1.25.56 1.25 1.25v.325C11.673 4.025 10.84 4 10 4ZM8.58 7.72a.75.75 0 0 0-1.5.06l.3 7.5a.75.75 0 1 0 1.5-.06l-.3-7.5Zm4.42.06a.75.75 0 0 0-1.5-.06l-.3 7.5a.75.75 0 1 0 1.5.06l.3-7.5Z" clipRule="evenodd" /></svg>
+                          Delete
+                        </button>
+                      )}
+                    </div>
+                  </>
+                )}
+                {reactingOpen && (
+                  <>
+                    <div className="fixed inset-0 z-10" onClick={() => onReactingOpen(null)} />
+                    <div className={`absolute z-20 flex gap-1 p-2 bg-[#1C1C1E] border border-[#333] rounded-xl shadow-xl ${isOwn ? 'bottom-full right-0 mb-1' : 'bottom-full left-0 mb-1'}`}>
+                      {['😀','❤️','🔥','😂','👍','🎉','😢','😡'].map((emoji) => (
+                        <button
+                          key={emoji}
+                          onClick={() => { onToggleReaction(msg.id, emoji); onReactingOpen(null); }}
+                          className="text-lg hover:scale-125 transition-transform p-1"
+                        >
+                          {emoji}
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {msg.reactions && Object.keys(msg.reactions).length > 0 && (
+            <div className={`flex flex-wrap gap-1 mt-1 ${isOwn ? 'justify-end' : 'justify-start'} px-1`}>
+              {Object.entries(msg.reactions).map(([emoji, uids]) => (
+                <button
+                  key={emoji}
+                  onClick={() => onToggleReaction(msg.id, emoji)}
+                  className={`text-[11px] flex items-center gap-1 px-1.5 py-0.5 rounded-full border transition-colors ${
+                    uids.includes(userUid || '')
+                      ? 'bg-[#007AFF]/20 border-[#007AFF]/40 text-white'
+                      : 'bg-[#1C1C1E] border-[#333] text-[#999] hover:bg-[#252525]'
+                  }`}
+                >
+                  <span>{emoji}</span>
+                  <span>{uids.length}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+});
 
 function fileToDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {

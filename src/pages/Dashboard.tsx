@@ -319,12 +319,16 @@ function RoomItem({
   getLastMessage: (code: string) => Promise<{ text: string; timestamp: number; senderUid: string; senderName: string } | null>;
 }) {
   const [preview, setPreview] = useState<{ text: string; timestamp: number; senderUid: string; senderName: string } | null>(null);
+  const [memberCount, setMemberCount] = useState<number | null>(null);
   const { user } = useStore();
 
   useEffect(() => {
     let cancelled = false;
     getLastMessage(room.code).then((msg) => {
       if (msg && !cancelled) setPreview(msg);
+    });
+    getDocs(collection(db, 'rooms', room.code, 'members')).then((snap) => {
+      if (!cancelled) setMemberCount(snap.size);
     });
     return () => { cancelled = true; };
   }, [room.code, getLastMessage]);
@@ -353,15 +357,23 @@ function RoomItem({
       className="w-full flex items-center gap-3 p-3 rounded-2xl border border-[#222] bg-[#0D0D0D] text-left hover:bg-[#141414] hover:border-[#333] transition-all active:scale-[0.98] group"
     >
       <div
-        className="w-11 h-11 rounded-xl flex items-center justify-center font-bold text-white text-xs shrink-0 shadow-lg"
+        className="w-11 h-11 rounded-xl flex items-center justify-center font-bold text-white text-sm shrink-0 shadow-lg"
         style={{ background: roomGradient(room.code) }}
       >
-        {room.code}
+        #
       </div>
       <div className="flex-1 min-w-0">
         <div className="flex items-center justify-between gap-2">
-          <p className="text-sm font-semibold text-white truncate">
-            Room <span className="font-mono text-[#007AFF]">#{room.code}</span>
+          <p className="text-sm font-semibold text-white truncate flex items-center gap-1.5">
+            <span className="font-mono">{room.code}</span>
+            {memberCount !== null && (
+              <span className="text-[10px] font-normal text-[#555] flex items-center gap-0.5">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3 h-3">
+                  <path d="M10 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM6 8a2 2 0 1 1-4 0 2 2 0 0 1 4 0ZM1.49 15.326a.78.78 0 0 1-.358-.442 3 3 0 0 1 4.308-3.516 6.484 6.484 0 0 0-1.905 3.959c-.023.222-.014.442.025.654a4.97 4.97 0 0 1-2.07-.655ZM16.44 15.98a4.97 4.97 0 0 0 2.07-.654.78.78 0 0 0 .357-.442 3 3 0 0 0-4.308-3.517 6.484 6.484 0 0 1 1.907 3.96 2.32 2.32 0 0 1-.026.654ZM18 8a2 2 0 1 1-4 0 2 2 0 0 1 4 0ZM5.304 16.19a.844.844 0 0 1-.277-.71 5 5 0 0 1 9.947 0 .843.843 0 0 1-.277.71A6.975 6.975 0 0 1 10 18a6.974 6.974 0 0 1-4.696-1.81Z" />
+                </svg>
+                {memberCount}
+              </span>
+            )}
           </p>
           {preview && (
             <span className="text-[10px] text-[#555] shrink-0 font-medium">
