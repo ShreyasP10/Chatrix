@@ -462,7 +462,7 @@ export default function ChatScreen() {
         : `${typingUsers[0].name} and ${typingUsers.length - 1} others are typing...`;
 
   return (
-    <div className="flex flex-col h-dvh max-w-md mx-auto" style={{ background: 'radial-gradient(ellipse at 50% 0%, #0a0a0f 0%, #000 70%)' }}>
+    <div className="flex flex-col h-dvh max-w-md md:max-w-lg lg:max-w-xl mx-auto" style={{ background: 'radial-gradient(ellipse at 50% 0%, #0a0a0f 0%, #000 70%)' }}>
       <header className="flex items-center gap-3 px-4 py-3 border-b border-[#222] shrink-0 bg-black/50 backdrop-blur-sm">
         <button onClick={() => navigate('/')} className="text-[#007AFF] font-medium text-sm shrink-0 hover:opacity-80 transition-opacity">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 inline-block -ml-1">
@@ -844,42 +844,43 @@ const MessageItem = memo(function MessageItem({
         </div>
       ) : (
         <>
-          {msg.replyTo && (
-            <div
-              className={`text-xs px-3 py-1.5 rounded-xl border border-[#333]/50 max-w-[75%] mb-0.5 ${
-                isOwn ? 'rounded-br-sm bg-[#0055BB]/20 mr-9' : 'rounded-bl-sm bg-[#222] ml-9'
-              }`}
-            >
-              <span className="text-[#00FF88] text-[10px] font-medium">@{msg.replyTo.senderName}</span>
-              <p className="text-[#777] text-[11px] truncate mt-0.5">{msg.replyTo.text}</p>
-            </div>
-          )}
-
           <div className={`flex gap-1 ${isOwn ? 'flex-row' : 'flex-row-reverse'}`}>
-            {isImage ? (
-              <div
-                className={`max-w-[72%] rounded-2xl overflow-hidden border border-[#333]/50 shadow-lg ${
-                  isOwn ? 'rounded-br-sm' : 'rounded-bl-sm'
-                }`}
-              >
-                <img
-                  src={msg.text}
-                  alt="Shared image"
-                  className="w-full h-auto max-h-72 object-cover"
-                  loading="lazy"
-                />
-              </div>
-            ) : (
-              <div
-                className={`max-w-[80%] px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed break-words shadow-sm ${
-                  isOwn
-                    ? 'bg-[#007AFF] text-white rounded-br-sm'
-                    : 'bg-[#1C1C1E] text-[#E5E5E5] rounded-bl-sm border border-[#2A2A2A]'
-                }`}
-              >
-                <MentionText text={msg.text} />
-              </div>
-            )}
+            <div className={`flex flex-col ${isOwn ? 'items-end' : 'items-start'} max-w-[80%]`}>
+              {msg.replyTo && (
+                <div
+                  className={`text-xs px-3 py-1.5 rounded-xl border border-[#333]/50 max-w-full mb-0.5 ${
+                    isOwn ? 'rounded-br-sm bg-[#0055BB]/20' : 'rounded-bl-sm bg-[#222]'
+                  }`}
+                >
+                  <span className="text-[#00FF88] text-[10px] font-medium">@{msg.replyTo.senderName}</span>
+                  <p className="text-[#777] text-[11px] truncate mt-0.5">{msg.replyTo.text}</p>
+                </div>
+              )}
+              {isImage ? (
+                <div
+                  className={`max-w-full rounded-2xl overflow-hidden border border-[#333]/50 shadow-lg ${
+                    isOwn ? 'rounded-br-sm' : 'rounded-bl-sm'
+                  }`}
+                >
+                  <img
+                    src={msg.text}
+                    alt="Shared image"
+                    className="w-full h-auto max-h-72 object-cover"
+                    loading="lazy"
+                  />
+                </div>
+              ) : (
+                <div
+                  className={`max-w-full px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed break-words shadow-sm ${
+                    isOwn
+                      ? 'bg-[#007AFF] text-white rounded-br-sm'
+                      : 'bg-[#1C1C1E] text-[#E5E5E5] rounded-bl-sm border border-[#2A2A2A]'
+                  }`}
+                >
+                  <MentionText text={msg.text} />
+                </div>
+              )}
+            </div>
             <div className="flex flex-col gap-0.5 pt-1 shrink-0">
               {isOwn && !msg.deleted && (
                 <button

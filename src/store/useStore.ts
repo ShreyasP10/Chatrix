@@ -11,6 +11,7 @@ interface AppState {
   joinedRooms: JoinedRoom[];
   setJoinedRooms: (rooms: JoinedRoom[]) => void;
   addJoinedRoom: (room: JoinedRoom) => void;
+  removeJoinedRoom: (code: string) => void;
 }
 
 export const useStore = create<AppState>((set) => ({
@@ -31,4 +32,8 @@ export const useStore = create<AppState>((set) => ({
       if (exists) return state;
       return { joinedRooms: [...state.joinedRooms, room] };
     }),
+  removeJoinedRoom: (code) =>
+    set((state) => ({
+      joinedRooms: state.joinedRooms.filter((r) => r.code !== code),
+    })),
 }));

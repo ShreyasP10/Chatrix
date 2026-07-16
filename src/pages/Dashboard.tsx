@@ -31,7 +31,7 @@ export default function Dashboard() {
   const [editingName, setEditingName] = useState(false);
   const [nameInput, setNameInput] = useState('');
   const navigate = useNavigate();
-  const { user, setUser, joinedRooms, setJoinedRooms, addJoinedRoom } = useStore();
+  const { user, setUser, joinedRooms, setJoinedRooms, addJoinedRoom, removeJoinedRoom } = useStore();
   const { showPrompt, install } = useInstallPrompt();
   const nameInputRef = useRef<HTMLInputElement>(null);
 
@@ -175,9 +175,10 @@ export default function Dashboard() {
       if (snap.empty) return null;
       const data = snap.docs[0].data();
       const key = await deriveKey(roomCode);
-      const text = await decrypt(data.ciphertext, data.iv, key);
+      const decrypted = await decrypt(data.ciphertext, data.iv, key);
+      const parsed = JSON.parse(decrypted);
       return {
-        text: text.slice(0, 40),
+        text: (parsed.text || decrypted).slice(0, 40),
         timestamp: data.timestamp?.toMillis() ?? Date.now(),
         senderUid: data.senderUid,
         senderName: data.senderName || data.senderUid?.slice(0, 6),
@@ -188,7 +189,7 @@ export default function Dashboard() {
   }, []);
 
   return (
-    <div className="flex flex-col items-center min-h-dvh px-4 py-8 max-w-md mx-auto">
+    <div className="flex flex-col items-center min-h-dvh px-4 py-8 max-w-md md:max-w-lg lg:max-w-xl mx-auto">
       {user && (
         <div className="flex items-center gap-3 mb-6 self-start w-full animate-fade-in group">
           <div className="relative">
@@ -299,6 +300,12 @@ export default function Dashboard() {
                 key={room.code}
                 room={room}
                 onEnter={() => navigate(`/chat/${room.code}`)}
+                onDelete={() => {
+                  localDB.joinedRooms.delete(room.code);
+                  removeJoinedRoom(room.code);
+                  const remaining = useStore.getState().joinedRooms.map((r) => r.code);
+                  swSend({ type: 'WATCH_ROOMS', rooms: remaining });
+                }}
                 getLastMessage={getLastMessage}
               />
             ))}
@@ -312,10 +319,12 @@ export default function Dashboard() {
 function RoomItem({
   room,
   onEnter,
+  onDelete,
   getLastMessage,
 }: {
   room: JoinedRoom;
   onEnter: () => void;
+  onDelete: () => void;
   getLastMessage: (code: string) => Promise<{ text: string; timestamp: number; senderUid: string; senderName: string } | null>;
 }) {
   const [preview, setPreview] = useState<{ text: string; timestamp: number; senderUid: string; senderName: string } | null>(null);
@@ -395,9 +404,20 @@ function RoomItem({
           )}
         </p>
       </div>
-      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 text-[#333] group-hover:text-[#555] transition-colors shrink-0">
-        <path fillRule="evenodd" d="M7.21 14.77a.75.75 0 0 1 .02-1.06L11.168 10 7.23 6.29a.75.75 0 1 1 1.04-1.08l4.5 4.25a.75.75 0 0 1 0 1.08l-4.5 4.25a.75.75 0 0 1-1.06-.02Z" clipRule="evenodd" />
-      </svg>
+      <div className="flex items-center gap-1">
+        <button
+          onClick={(e) => { e.stopPropagation(); onDelete(); }}
+          className="text-[#333] hover:text-red-400 p-1 rounded-lg hover:bg-red-400/5 transition-all opacity-0 group-hover:opacity-100"
+          title="Remove room"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+            <path fillRule="evenodd" d="M8.75 1A2.75 2.75 0 0 0 6 3.75v.443c-.795.077-1.584.176-2.365.298a.75.75 0 1 0 .23 1.482l.149-.022.841 10.518A2.75 2.75 0 0 0 7.596 19h4.807a2.75 2.75 0 0 0 2.742-2.53l.841-10.52.149.023a.75.75 0 0 0 .23-1.482A41.03 41.03 0 0 0 14 4.193V3.75A2.75 2.75 0 0 0 11.25 1h-2.5ZM10 4c-.84 0-1.673.025-2.5.075V3.75c0-.69.56-1.25 1.25-1.25h2.5c.69 0 1.25.56 1.25 1.25v.325C11.673 4.025 10.84 4 10 4ZM8.58 7.72a.75.75 0 0 0-1.5.06l.3 7.5a.75.75 0 1 0 1.5-.06l-.3-7.5Zm4.42.06a.75.75 0 0 0-1.5-.06l-.3 7.5a.75.75 0 1 0 1.5.06l.3-7.5Z" clipRule="evenodd" />
+          </svg>
+        </button>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 text-[#333] group-hover:text-[#555] transition-colors shrink-0">
+          <path fillRule="evenodd" d="M7.21 14.77a.75.75 0 0 1 .02-1.06L11.168 10 7.23 6.29a.75.75 0 1 1 1.04-1.08l4.5 4.25a.75.75 0 0 1 0 1.08l-4.5 4.25a.75.75 0 0 1-1.06-.02Z" clipRule="evenodd" />
+        </svg>
+      </div>
     </button>
   );
 }
