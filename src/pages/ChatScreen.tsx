@@ -19,6 +19,7 @@ import {
 import { db } from '../lib/firebase';
 import { deriveKey, encrypt, decrypt } from '../lib/crypto';
 import { swSend } from '../lib/sw';
+import { localDB } from '../lib/db';
 import { useStore } from '../store/useStore';
 import Avatar from '../components/Avatar';
 import EmojiPicker from '../components/EmojiPicker';
@@ -45,6 +46,9 @@ export default function ChatScreen() {
   const [showMembers, setShowMembers] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [roomReady, setRoomReady] = useState(false);
+  const [displayName, setDisplayName] = useState(code || '');
+  const [renaming, setRenaming] = useState(false);
+  const [renameInput, setRenameInput] = useState('');
   const [memberList, setMemberList] = useState<{ name: string; uid: string }[]>([]);
   const [mentionQuery, setMentionQuery] = useState('');
   const [mentionStartIndex, setMentionStartIndex] = useState(-1);
@@ -74,8 +78,11 @@ export default function ChatScreen() {
     setRoomReady(false);
     const unsub = onSnapshot(doc(db, 'rooms', code), async (snap) => {
       if (!snap.exists()) {
-        await setDoc(doc(db, 'rooms', code), { createdAt: serverTimestamp() });
+        await setDoc(doc(db, 'rooms', code), { createdAt: serverTimestamp(), displayName: code });
         await setDoc(doc(db, 'rooms', code, 'members', user.uid), { joinedAt: serverTimestamp(), name: user.name });
+      } else {
+        const data = snap.data();
+        if (data.displayName) setDisplayName(data.displayName);
       }
       setRoomReady(true);
     });
@@ -389,6 +396,24 @@ export default function ChatScreen() {
     setMenuMsgId(null);
   };
 
+  const startRename = () => {
+    setRenameInput(displayName);
+    setRenaming(true);
+  };
+
+  const saveRename = async () => {
+    const trimmed = renameInput.trim();
+    if (!trimmed || !code) {
+      setRenaming(false);
+      return;
+    }
+    try {
+      await updateDoc(doc(db, 'rooms', code), { displayName: trimmed });
+      await localDB.joinedRooms.update(code, { displayName: trimmed });
+    } catch {}
+    setRenaming(false);
+  };
+
   const toggleReaction = async (msgId: string, emoji: string) => {
     if (!code || !user) return;
     const msgRef = doc(db, 'rooms', code, 'messages', msgId);
@@ -470,9 +495,36 @@ export default function ChatScreen() {
           </svg>
         </button>
         <div className="flex-1 text-center min-w-0">
-          <h1 className="text-sm font-bold truncate">
-            <span className="text-[#007AFF]">#</span>{code}
-          </h1>
+          {renaming ? (
+            <div className="flex items-center justify-center gap-2">
+              <input
+                value={renameInput}
+                onChange={(e) => setRenameInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') saveRename();
+                  if (e.key === 'Escape') setRenaming(false);
+                }}
+                onBlur={saveRename}
+                maxLength={50}
+                className="bg-[#1C1C1E] text-white text-sm font-bold rounded-lg px-2 py-1 outline-none border border-[#333] w-40 text-center"
+                autoFocus
+              />
+            </div>
+          ) : (
+            <div className="flex items-center justify-center gap-1.5">
+              <h1 className="text-sm font-bold truncate max-w-[200px]">{displayName}</h1>
+              <button
+                onClick={startRename}
+                className="text-[#555] hover:text-[#007AFF] transition-colors shrink-0"
+                title="Rename room"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5">
+                  <path d="m5.433 13.917 1.262-3.155A4 4 0 0 1 7.58 9.42l6.92-6.918a2.121 2.121 0 0 1 3 3l-6.92 6.918c-.383.383-.84.685-1.343.886l-3.154 1.262a.5.5 0 0 1-.65-.65Z" />
+                  <path d="M3.5 5.75c0-.69.56-1.25 1.25-1.25H10A.75.75 0 0 0 10 3H4.75A2.75 2.75 0 0 0 2 5.75v9.5A2.75 2.75 0 0 0 4.75 18h9.5A2.75 2.75 0 0 0 17 15.25V10a.75.75 0 0 0-1.5 0v5.25c0 .69-.56 1.25-1.25 1.25h-9.5c-.69 0-1.25-.56-1.25-1.25v-9.5Z" />
+                </svg>
+              </button>
+            </div>
+          )}
           {typingText ? (
             <p className="text-xs text-[#00FF88] truncate flex items-center justify-center gap-1.5">
               <span className="flex gap-0.5">
