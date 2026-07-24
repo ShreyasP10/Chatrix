@@ -64,6 +64,8 @@ export default function ChatScreen() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const seenMsgIds = useRef<Set<string>>(new Set());
   const initialSnapshotDone = useRef(false);
+  const userRef = useRef(user);
+  userRef.current = user;
 
   useEffect(() => {
     if (!code) return;
@@ -147,14 +149,14 @@ export default function ChatScreen() {
         const isHidden = document.hidden;
 
         // Forward new messages from others to SW when page is backgrounded
-        if (isHidden && user) {
+        if (isHidden && userRef.current) {
           snap.docChanges().forEach((change) => {
             if (change.type !== 'added') return;
             const id = change.doc.id;
             if (seenMsgIds.current.has(id)) return;
             seenMsgIds.current.add(id);
             const d = change.doc.data();
-            if (d.senderUid !== user.uid) {
+            if (d.senderUid !== userRef.current?.uid) {
               swSend({
                 type: 'SHOW_NOTIFICATION',
                 roomCode: code,
@@ -246,7 +248,7 @@ export default function ChatScreen() {
     if (el) scrollAnchorRef.current = { scrollHeight: el.scrollHeight };
     setMessages((prev) => [...older.reverse(), ...prev]);
     setLoadingOlder(false);
-  }, [code, cryptoKey, hasMore, loadingOlder]);
+  }, [code, cryptoKey, hasMore, loadingOlder, setMessages]);
 
   const updateTypingStatus = useCallback(
     (text: string) => {
