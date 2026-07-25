@@ -7,7 +7,7 @@ class ChatrixDB extends Dexie {
 
   constructor() {
     super('ChatrixDB');
-    this.version(1).stores({
+    this.version(2).stores({
       userProfile: 'uid',
       joinedRooms: 'code',
     });

@@ -19,7 +19,10 @@ import { deriveKey, decrypt } from '../lib/crypto';
 import { useStore } from '../store/useStore';
 import { useInstallPrompt } from '../hooks/useInstallPrompt';
 import { swSend } from '../lib/sw';
-import Avatar from '../components/Avatar';
+
+import OtpInput from '../components/OtpInput';
+import Avatar, { getInitials } from '../components/Avatar';
+
 import type { JoinedRoom } from '../types';
 
 const VAPID_KEY = import.meta.env.VITE_FIREBASE_VAPID_KEY;
@@ -34,10 +37,13 @@ export default function Dashboard() {
   const [loading, setLoading] = useState('');
   const [editingName, setEditingName] = useState(false);
   const [nameInput, setNameInput] = useState('');
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [createName, setCreateName] = useState('');
   const navigate = useNavigate();
   const { user, setUser, joinedRooms, setJoinedRooms, addJoinedRoom, removeJoinedRoom } = useStore();
   const { showPrompt, install } = useInstallPrompt();
   const nameInputRef = useRef<HTMLInputElement>(null);
+  const createInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     localDB.joinedRooms.toArray().then((rooms) => {
@@ -88,13 +94,15 @@ export default function Dashboard() {
         setLoading('');
         return;
       }
+      const roomData = snap.data();
+      const roomName = roomData?.name || `Room ${code}`;
       if (user) {
         await setDoc(doc(db, 'rooms', name, 'members', user.uid), { joinedAt: serverTimestamp(), name: user.name });
       }
       const roomData = snap.data();
       const room: JoinedRoom = {
-        code: name,
-        displayName: roomData.displayName || name,
+        code,
+        name: roomName,
         joinedAt: Date.now(),
         lastReadTimestamp: Date.now(),
       };
@@ -109,22 +117,36 @@ export default function Dashboard() {
     setLoading('');
   };
 
-  const createRoom = async () => {
-    const name = sanitizeRoomName(roomName);
-    if (!name) {
-      setError('Enter a room name');
-      return;
-    }
+
+  const openCreateModal = () => {
+    setCreateName('');
+    setShowCreateModal(true);
+    setTimeout(() => createInputRef.current?.focus(), 50);
+  };
+
+  const createRoom = async (roomName: string) => {
+    setShowCreateModal(false);
     setLoading('create');
     setError('');
-    try {
-      const snap = await getDoc(doc(db, 'rooms', name));
-      if (snap.exists()) {
-        setError('Room already exists. Use Join instead.');
-        setLoading('');
-        return;
+    let newCode: string | null = null;
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const candidate = String(Math.floor(Math.random() * 9000) + 1000);
+      const snap = await getDoc(doc(db, 'rooms', candidate));
+      if (!snap.exists()) {
+        newCode = candidate;
+        break;
       }
-      await setDoc(doc(db, 'rooms', name), {
+    }
+    if (!newCode) {
+      setError('Could not generate unique code. Try again.');
+      setLoading('');
+      return;
+    }
+    const finalName = roomName.trim() || `Room ${newCode}`;
+    try {
+      await setDoc(doc(db, 'rooms', newCode), {
+        name: finalName,
+
         createdAt: serverTimestamp(),
         createdBy: user?.uid,
         displayName: roomName.trim(),
@@ -133,8 +155,10 @@ export default function Dashboard() {
         await setDoc(doc(db, 'rooms', name, 'members', user.uid), { joinedAt: serverTimestamp(), name: user.name });
       }
       const room: JoinedRoom = {
-        code: name,
-        displayName: roomName.trim(),
+
+        code: newCode,
+        name: finalName,
+
         joinedAt: Date.now(),
         lastReadTimestamp: Date.now(),
       };
@@ -183,8 +207,9 @@ export default function Dashboard() {
       const key = await deriveKey(roomCode);
       const decrypted = await decrypt(data.ciphertext, data.iv, key);
       const parsed = JSON.parse(decrypted);
+      const isImage = parsed.type === 'image' || parsed.type === 'gif';
       return {
-        text: (parsed.text || decrypted).slice(0, 40),
+        text: isImage ? 'Image' : (parsed.text || decrypted).slice(0, 40),
         timestamp: data.timestamp?.toMillis() ?? Date.now(),
         senderUid: data.senderUid,
         senderName: data.senderName || data.senderUid?.slice(0, 6),
@@ -281,8 +306,10 @@ export default function Dashboard() {
             ) : 'Join'}
           </button>
           <button
-            onClick={createRoom}
-            disabled={!roomName.trim() || loading === 'create'}
+
+            onClick={openCreateModal}
+            disabled={loading === 'create'}
+
             className="flex-1 py-3 rounded-xl font-semibold border border-[#333] text-[#B3B3B3] disabled:opacity-30 disabled:cursor-not-allowed hover:border-[#555] hover:text-white active:scale-[0.98] transition-all"
           >
             {loading === 'create' ? (
@@ -302,6 +329,51 @@ export default function Dashboard() {
         >
           Install App
         </button>
+      )}
+
+      {showCreateModal && (
+        <>
+          <div className="fixed inset-0 z-50 bg-black/60" onClick={() => setShowCreateModal(false)} />
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-6 pointer-events-none">
+            <div
+              className="bg-[#1C1C1E] border border-[#333] rounded-2xl w-full max-w-sm shadow-2xl pointer-events-auto animate-fade-in"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="px-5 pt-5 pb-2">
+                <h2 className="text-lg font-bold text-white">Create Room</h2>
+                <p className="text-xs text-[#555] mt-1">Give your room a name</p>
+              </div>
+              <div className="px-5 py-4">
+                <input
+                  ref={createInputRef}
+                  value={createName}
+                  onChange={(e) => setCreateName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') createRoom(createName);
+                    if (e.key === 'Escape') setShowCreateModal(false);
+                  }}
+                  placeholder="e.g. Family Chat"
+                  maxLength={30}
+                  className="w-full bg-[#0D0D0D] text-white text-sm rounded-xl px-4 py-3 outline-none border border-[#333] focus:border-[#555] transition-colors placeholder-[#555]"
+                />
+              </div>
+              <div className="flex gap-3 px-5 pb-5">
+                <button
+                  onClick={() => setShowCreateModal(false)}
+                  className="flex-1 py-2.5 rounded-xl text-sm font-medium text-[#555] border border-[#333] hover:text-white hover:border-[#555] transition-all"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => createRoom(createName)}
+                  className="flex-1 py-2.5 rounded-xl text-sm font-medium bg-[#007AFF] text-white hover:bg-[#0066CC] transition-all"
+                >
+                  {createName.trim() ? 'Create' : 'Skip →'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </>
       )}
 
       {joinedRooms.length > 0 && (
@@ -350,7 +422,9 @@ function RoomItem({
 }) {
   const [preview, setPreview] = useState<{ text: string; timestamp: number; senderUid: string; senderName: string } | null>(null);
   const [memberCount, setMemberCount] = useState<number | null>(null);
-  const [displayName, setDisplayName] = useState(room.displayName || room.code);
+
+  const [roomName, setRoomName] = useState(room.name || '');
+
   const { user } = useStore();
 
   useEffect(() => {
@@ -360,6 +434,13 @@ function RoomItem({
     });
     getDocs(collection(db, 'rooms', room.code, 'members')).then((snap) => {
       if (!cancelled) setMemberCount(snap.size);
+    });
+    // Fetch room name from Firestore (for rooms that may not have name stored locally)
+    getDoc(doc(db, 'rooms', room.code)).then((snap) => {
+      if (snap.exists() && !cancelled) {
+        const data = snap.data();
+        if (data.name) setRoomName(data.name);
+      }
     });
     return () => { cancelled = true; };
   }, [room.code, getLastMessage]);
@@ -385,11 +466,13 @@ function RoomItem({
     return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   };
 
-  function roomGradient(name: string) {
+
+  function hashColor(name: string) {
+
     let hash = 0;
     for (let i = 0; i < name.length; i++) hash = name.charCodeAt(i) + ((hash << 5) - hash);
     const h = Math.abs(hash) % 360;
-    return `linear-gradient(135deg, hsl(${h}, 55%, 40%), hsl(${(h + 40) % 360}, 50%, 30%))`;
+    return `linear-gradient(135deg, hsl(${h}, 55%, 45%), hsl(${(h + 40) % 360}, 50%, 35%))`;
   }
 
   return (
@@ -399,14 +482,18 @@ function RoomItem({
     >
       <div
         className="w-11 h-11 rounded-xl flex items-center justify-center font-bold text-white text-sm shrink-0 shadow-lg"
-        style={{ background: roomGradient(displayName) }}
+
+        style={{ background: hashColor(roomName) }}
       >
-        {displayName.slice(0, 2).toUpperCase()}
+        {roomName ? getInitials(roomName) : '?'}
+
       </div>
       <div className="flex-1 min-w-0">
         <div className="flex items-center justify-between gap-2">
           <p className="text-sm font-semibold text-white truncate flex items-center gap-1.5">
-            <span>{displayName}</span>
+
+            <span>{roomName}</span>
+
             {memberCount !== null && (
               <span className="text-[10px] font-normal text-[#555] flex items-center gap-0.5">
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3 h-3">
@@ -429,7 +516,7 @@ function RoomItem({
                 {preview.senderUid === user?.uid ? 'You' : preview.senderName}
               </span>
               <span className="text-[#444]">&middot;</span>
-              <span>{preview.text}</span>
+              <span>{preview.text === 'Image' ? '📷 Image' : preview.text}</span>
             </>
           ) : (
             <span className="text-[#555] italic">No messages yet</span>

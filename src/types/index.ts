@@ -6,7 +6,9 @@ export interface UserProfile {
 
 export interface JoinedRoom {
   code: string;
-  displayName?: string;
+
+  name: string;
+
   joinedAt: number;
   lastReadTimestamp: number | null;
 }
@@ -45,6 +47,7 @@ export interface FirestoreUser {
 }
 
 export interface FirestoreRoom {
+  name: string;
   createdAt: object;
   createdBy?: string;
 }
@@ -77,5 +80,27 @@ export interface FirestoreMember {
 export interface TypingUser {
   uid: string;
   name: string;
+  timestamp: number;
+}
+
+export interface CallParticipant {
+  uid: string;
+  name: string;
+  muted: boolean;
+  joinedAt: number;
+}
+
+export interface CallState {
+  active: boolean;
+  initiatorUid: string;
+  initiatorName: string;
+  startTime: number;
+  room: string;
+  participantCount: number;
+}
+
+export interface CallInvitation {
+  inviterUid: string;
+  inviterName: string;
   timestamp: number;
 }
