@@ -20,6 +20,7 @@ import { db } from '../lib/firebase';
 import { deriveKey, encrypt, decrypt } from '../lib/crypto';
 import { localDB } from '../lib/db';
 import { swSend } from '../lib/sw';
+import { localDB } from '../lib/db';
 import { useStore } from '../store/useStore';
 import Avatar from '../components/Avatar';
 import EmojiPicker from '../components/EmojiPicker';
@@ -49,10 +50,12 @@ export default function ChatScreen() {
   const [showMembers, setShowMembers] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [roomReady, setRoomReady] = useState(false);
+  
   const [roomName, setRoomName] = useState('');
   const [editingRoomName, setEditingRoomName] = useState(false);
   const [roomNameInput, setRoomNameInput] = useState('');
   const [memberList, setMemberList] = useState<{ name: string; uid: string; online?: boolean }[]>([]);
+
   const [mentionQuery, setMentionQuery] = useState('');
   const [mentionStartIndex, setMentionStartIndex] = useState(-1);
   const [mentionSelectedIndex, setMentionSelectedIndex] = useState(0);
@@ -68,6 +71,8 @@ export default function ChatScreen() {
   const roomNameInputRef = useRef<HTMLInputElement>(null);
   const seenMsgIds = useRef<Set<string>>(new Set());
   const initialSnapshotDone = useRef(false);
+  const userRef = useRef(user);
+  userRef.current = user;
 
   const voiceCall = useVoiceCall(code);
 
@@ -84,6 +89,7 @@ export default function ChatScreen() {
     setRoomReady(false);
     const unsub = onSnapshot(doc(db, 'rooms', code), async (snap) => {
       if (!snap.exists()) {
+
         await setDoc(doc(db, 'rooms', code), { name: `Room ${code}`, createdAt: serverTimestamp() });
         await setDoc(doc(db, 'rooms', code, 'members', user.uid), { joinedAt: serverTimestamp(), name: user.name });
         setRoomName(`Room ${code}`);
@@ -99,6 +105,7 @@ export default function ChatScreen() {
             useStore.getState().joinedRooms.map((r) => r.code === code ? { ...r, name } : r)
           );
         }
+
       }
       setRoomReady(true);
     });
@@ -181,14 +188,14 @@ export default function ChatScreen() {
         const isHidden = document.hidden;
 
         // Forward new messages from others to SW when page is backgrounded
-        if (isHidden && user) {
+        if (isHidden && userRef.current) {
           snap.docChanges().forEach((change) => {
             if (change.type !== 'added') return;
             const id = change.doc.id;
             if (seenMsgIds.current.has(id)) return;
             seenMsgIds.current.add(id);
             const d = change.doc.data();
-            if (d.senderUid !== user.uid) {
+            if (d.senderUid !== userRef.current?.uid) {
               swSend({
                 type: 'SHOW_NOTIFICATION',
                 roomCode: code,
@@ -285,7 +292,7 @@ export default function ChatScreen() {
     if (el) scrollAnchorRef.current = { scrollHeight: el.scrollHeight };
     setMessages((prev) => [...older.reverse(), ...prev]);
     setLoadingOlder(false);
-  }, [code, cryptoKey, hasMore, loadingOlder]);
+  }, [code, cryptoKey, hasMore, loadingOlder, setMessages]);
 
   const updateTypingStatus = useCallback(
     (text: string) => {
@@ -462,6 +469,24 @@ export default function ChatScreen() {
     setMenuMsgId(null);
   };
 
+  const startRename = () => {
+    setRenameInput(displayName);
+    setRenaming(true);
+  };
+
+  const saveRename = async () => {
+    const trimmed = renameInput.trim();
+    if (!trimmed || !code) {
+      setRenaming(false);
+      return;
+    }
+    try {
+      await updateDoc(doc(db, 'rooms', code), { displayName: trimmed });
+      await localDB.joinedRooms.update(code, { displayName: trimmed });
+    } catch {}
+    setRenaming(false);
+  };
+
   const toggleReaction = async (msgId: string, emoji: string) => {
     if (!code || !user) return;
     const msgRef = doc(db, 'rooms', code, 'messages', msgId);
@@ -543,6 +568,7 @@ export default function ChatScreen() {
           </svg>
         </button>
         <div className="flex-1 text-center min-w-0">
+
           {editingRoomName ? (
             <input
               ref={roomNameInputRef}
@@ -567,6 +593,7 @@ export default function ChatScreen() {
                 title="Edit room name"
               >
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3 h-3">
+
                   <path d="m5.433 13.917 1.262-3.155A4 4 0 0 1 7.58 9.42l6.92-6.918a2.121 2.121 0 0 1 3 3l-6.92 6.918c-.383.383-.84.685-1.343.886l-3.154 1.262a.5.5 0 0 1-.65-.65Z" />
                   <path d="M3.5 5.75c0-.69.56-1.25 1.25-1.25H10A.75.75 0 0 0 10 3H4.75A2.75 2.75 0 0 0 2 5.75v9.5A2.75 2.75 0 0 0 4.75 18h9.5A2.75 2.75 0 0 0 17 15.25V10a.75.75 0 0 0-1.5 0v5.25c0 .69-.56 1.25-1.25 1.25h-9.5c-.69 0-1.25-.56-1.25-1.25v-9.5Z" />
                 </svg>

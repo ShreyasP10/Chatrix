@@ -6,7 +6,9 @@ export interface UserProfile {
 
 export interface JoinedRoom {
   code: string;
+
   name: string;
+
   joinedAt: number;
   lastReadTimestamp: number | null;
 }

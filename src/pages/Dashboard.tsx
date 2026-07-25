@@ -11,6 +11,7 @@ import {
   limit,
   getDocs,
   serverTimestamp,
+  onSnapshot,
 } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { localDB } from '../lib/db';
@@ -18,14 +19,20 @@ import { deriveKey, decrypt } from '../lib/crypto';
 import { useStore } from '../store/useStore';
 import { useInstallPrompt } from '../hooks/useInstallPrompt';
 import { swSend } from '../lib/sw';
+
 import OtpInput from '../components/OtpInput';
 import Avatar, { getInitials } from '../components/Avatar';
+
 import type { JoinedRoom } from '../types';
 
 const VAPID_KEY = import.meta.env.VITE_FIREBASE_VAPID_KEY;
 
+function sanitizeRoomName(name: string) {
+  return name.trim().toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '').slice(0, 50) || 'room';
+}
+
 export default function Dashboard() {
-  const [code, setCode] = useState('');
+  const [roomName, setRoomName] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState('');
   const [editingName, setEditingName] = useState(false);
@@ -76,11 +83,12 @@ export default function Dashboard() {
   }, [user]);
 
   const joinRoom = async () => {
-    if (code.length !== 4) return;
+    const name = sanitizeRoomName(roomName);
+    if (!name) return;
     setLoading('join');
     setError('');
     try {
-      const snap = await getDoc(doc(db, 'rooms', code));
+      const snap = await getDoc(doc(db, 'rooms', name));
       if (!snap.exists()) {
         setError('Room not found');
         setLoading('');
@@ -89,8 +97,9 @@ export default function Dashboard() {
       const roomData = snap.data();
       const roomName = roomData?.name || `Room ${code}`;
       if (user) {
-        await setDoc(doc(db, 'rooms', code, 'members', user.uid), { joinedAt: serverTimestamp(), name: user.name });
+        await setDoc(doc(db, 'rooms', name, 'members', user.uid), { joinedAt: serverTimestamp(), name: user.name });
       }
+      const roomData = snap.data();
       const room: JoinedRoom = {
         code,
         name: roomName,
@@ -99,14 +108,15 @@ export default function Dashboard() {
       };
       await localDB.joinedRooms.put(room);
       addJoinedRoom(room);
-      const allRooms = [...useStore.getState().joinedRooms.map((r) => r.code), code];
+      const allRooms = [...useStore.getState().joinedRooms.map((r) => r.code), name];
       swSend({ type: 'WATCH_ROOMS', rooms: allRooms });
-      navigate(`/chat/${code}`);
+      navigate(`/chat/${name}`);
     } catch {
       setError('Failed to join room');
     }
     setLoading('');
   };
+
 
   const openCreateModal = () => {
     setCreateName('');
@@ -136,21 +146,25 @@ export default function Dashboard() {
     try {
       await setDoc(doc(db, 'rooms', newCode), {
         name: finalName,
+
         createdAt: serverTimestamp(),
         createdBy: user?.uid,
+        displayName: roomName.trim(),
       });
       if (user) {
-        await setDoc(doc(db, 'rooms', newCode, 'members', user.uid), { joinedAt: serverTimestamp(), name: user.name });
+        await setDoc(doc(db, 'rooms', name, 'members', user.uid), { joinedAt: serverTimestamp(), name: user.name });
       }
       const room: JoinedRoom = {
+
         code: newCode,
         name: finalName,
+
         joinedAt: Date.now(),
         lastReadTimestamp: Date.now(),
       };
       await localDB.joinedRooms.put(room);
       addJoinedRoom(room);
-      navigate(`/chat/${newCode}`);
+      navigate(`/chat/${name}`);
     } catch {
       setError('Failed to create room');
     }
@@ -257,7 +271,22 @@ export default function Dashboard() {
       </div>
 
       <div className="w-full animate-slide-up">
-        <OtpInput value={code} onChange={setCode} />
+        <div className="flex items-center gap-2 bg-[#0D0D0D] border-2 border-[#333] rounded-xl px-4 py-3 focus-within:border-[#007AFF] transition-colors">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 text-[#555] shrink-0">
+            <path fillRule="evenodd" d="M9.965 11.026a5 5 0 1 1 1.06-1.06l2.755 2.754a.75.75 0 1 1-1.06 1.06l-2.755-2.754ZM10.5 7a3.5 3.5 0 1 1-7 0 3.5 3.5 0 0 1 7 0Z" clipRule="evenodd" />
+          </svg>
+          <input
+            type="text"
+            value={roomName}
+            onChange={(e) => setRoomName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') joinRoom();
+            }}
+            placeholder="Enter room name..."
+            maxLength={50}
+            className="flex-1 bg-transparent text-white text-sm outline-none placeholder-[#555]"
+          />
+        </div>
 
         {error && (
           <p className="mt-3 text-sm text-red-400 text-center">{error}</p>
@@ -266,7 +295,7 @@ export default function Dashboard() {
         <div className="flex gap-3 w-full mt-6">
           <button
             onClick={joinRoom}
-            disabled={code.length !== 4 || loading === 'join'}
+            disabled={!roomName.trim() || loading === 'join'}
             className="flex-1 py-3 rounded-xl font-semibold bg-[#007AFF] text-white disabled:opacity-30 disabled:cursor-not-allowed hover:bg-[#0066CC] active:scale-[0.98] transition-all"
           >
             {loading === 'join' ? (
@@ -277,8 +306,10 @@ export default function Dashboard() {
             ) : 'Join'}
           </button>
           <button
+
             onClick={openCreateModal}
             disabled={loading === 'create'}
+
             className="flex-1 py-3 rounded-xl font-semibold border border-[#333] text-[#B3B3B3] disabled:opacity-30 disabled:cursor-not-allowed hover:border-[#555] hover:text-white active:scale-[0.98] transition-all"
           >
             {loading === 'create' ? (
@@ -391,7 +422,9 @@ function RoomItem({
 }) {
   const [preview, setPreview] = useState<{ text: string; timestamp: number; senderUid: string; senderName: string } | null>(null);
   const [memberCount, setMemberCount] = useState<number | null>(null);
+
   const [roomName, setRoomName] = useState(room.name || '');
+
   const { user } = useStore();
 
   useEffect(() => {
@@ -412,6 +445,16 @@ function RoomItem({
     return () => { cancelled = true; };
   }, [room.code, getLastMessage]);
 
+  useEffect(() => {
+    const unsub = onSnapshot(doc(db, 'rooms', room.code), (snap) => {
+      if (snap.exists()) {
+        const data = snap.data();
+        if (data.displayName) setDisplayName(data.displayName);
+      }
+    });
+    return unsub;
+  }, [room.code]);
+
   const formatTime = (ts: number) => {
     const d = new Date(ts);
     const now = new Date();
@@ -423,7 +466,9 @@ function RoomItem({
     return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   };
 
+
   function hashColor(name: string) {
+
     let hash = 0;
     for (let i = 0; i < name.length; i++) hash = name.charCodeAt(i) + ((hash << 5) - hash);
     const h = Math.abs(hash) % 360;
@@ -437,14 +482,18 @@ function RoomItem({
     >
       <div
         className="w-11 h-11 rounded-xl flex items-center justify-center font-bold text-white text-sm shrink-0 shadow-lg"
+
         style={{ background: hashColor(roomName) }}
       >
         {roomName ? getInitials(roomName) : '?'}
+
       </div>
       <div className="flex-1 min-w-0">
         <div className="flex items-center justify-between gap-2">
           <p className="text-sm font-semibold text-white truncate flex items-center gap-1.5">
+
             <span>{roomName}</span>
+
             {memberCount !== null && (
               <span className="text-[10px] font-normal text-[#555] flex items-center gap-0.5">
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3 h-3">
