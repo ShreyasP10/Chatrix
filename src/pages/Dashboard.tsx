@@ -32,6 +32,7 @@ function sanitizeRoomName(name: string) {
 
 export default function Dashboard() {
   const [roomName, setRoomName] = useState('');
+  const joinInputs = useRef<(HTMLInputElement | null)[]>([]);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState('');
   const [editingName, setEditingName] = useState(false);
@@ -267,21 +268,35 @@ export default function Dashboard() {
       </div>
 
       <div className="w-full animate-slide-up">
-        <div className="flex items-center gap-2 bg-[#0D0D0D] border-2 border-[#333] rounded-xl px-4 py-3 focus-within:border-[#007AFF] transition-colors">
-          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 text-[#555] shrink-0">
-            <path fillRule="evenodd" d="M9.965 11.026a5 5 0 1 1 1.06-1.06l2.755 2.754a.75.75 0 1 1-1.06 1.06l-2.755-2.754ZM10.5 7a3.5 3.5 0 1 1-7 0 3.5 3.5 0 0 1 7 0Z" clipRule="evenodd" />
-          </svg>
-          <input
-            type="text"
-            value={roomName}
-            onChange={(e) => setRoomName(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') joinRoom();
-            }}
-            placeholder="Enter room name..."
-            maxLength={50}
-            className="flex-1 bg-transparent text-white text-sm outline-none placeholder-[#555]"
-          />
+        <p className="text-xs text-[#555] text-center mb-3">Enter room code</p>
+        <div className="flex items-center justify-center gap-3">
+          {[0, 1, 2, 3].map((i) => (
+            <input
+              key={i}
+              ref={(el) => { joinInputs.current[i] = el; }}
+              type="text"
+              inputMode="numeric"
+              pattern="[0-9]*"
+              maxLength={1}
+              value={roomName[i] || ''}
+              onChange={(e) => {
+                const val = e.target.value.replace(/\D/g, '').slice(0, 1);
+                const chars = roomName.split('');
+                chars[i] = val;
+                const joined = chars.join('').slice(0, 4);
+                setRoomName(joined);
+                if (val && i < 3) joinInputs.current[i + 1]?.focus();
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Backspace' && !roomName[i] && i > 0) {
+                  joinInputs.current[i - 1]?.focus();
+                }
+                if (e.key === 'Enter' && roomName.length === 4) joinRoom();
+              }}
+              onFocus={(e) => e.target.select()}
+              className="w-14 h-14 bg-[#0D0D0D] border-2 border-[#333] rounded-xl text-white text-xl font-bold text-center outline-none focus:border-[#007AFF] transition-colors [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+            />
+          ))}
         </div>
 
         {error && (
@@ -291,7 +306,7 @@ export default function Dashboard() {
         <div className="flex gap-3 w-full mt-6">
           <button
             onClick={joinRoom}
-            disabled={!roomName.trim() || loading === 'join'}
+            disabled={roomName.length !== 4 || loading === 'join'}
             className="flex-1 py-3 rounded-xl font-semibold bg-[#007AFF] text-white disabled:opacity-30 disabled:cursor-not-allowed hover:bg-[#0066CC] active:scale-[0.98] transition-all"
           >
             {loading === 'join' ? (
