@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { UserProfile, DecryptedMessage, JoinedRoom } from '../types';
+import type { UserProfile, DecryptedMessage, JoinedRoom, CallParticipant, CallState, CallInvitation } from '../types';
 
 interface AppState {
   user: UserProfile | null;
@@ -12,6 +12,16 @@ interface AppState {
   setJoinedRooms: (rooms: JoinedRoom[]) => void;
   addJoinedRoom: (room: JoinedRoom) => void;
   removeJoinedRoom: (code: string) => void;
+  callState: CallState | null;
+  setCallState: (state: CallState | null) => void;
+  callParticipants: CallParticipant[];
+  setCallParticipants: (p: CallParticipant[]) => void;
+  inCall: boolean;
+  setInCall: (v: boolean) => void;
+  callInvitations: CallInvitation[];
+  setCallInvitations: (v: CallInvitation[]) => void;
+  micEnabled: boolean;
+  setMicEnabled: (v: boolean) => void;
 }
 
 export const useStore = create<AppState>((set) => ({
@@ -36,4 +46,14 @@ export const useStore = create<AppState>((set) => ({
     set((state) => ({
       joinedRooms: state.joinedRooms.filter((r) => r.code !== code),
     })),
+  callState: null,
+  setCallState: (state) => set({ callState: state }),
+  callParticipants: [],
+  setCallParticipants: (p) => set({ callParticipants: p }),
+  inCall: false,
+  setInCall: (v) => set({ inCall: v }),
+  callInvitations: [],
+  setCallInvitations: (v) => set({ callInvitations: v }),
+  micEnabled: true,
+  setMicEnabled: (v) => set({ micEnabled: v }),
 }));
