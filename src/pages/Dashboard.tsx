@@ -20,7 +20,6 @@ import { useStore } from '../store/useStore';
 import { useInstallPrompt } from '../hooks/useInstallPrompt';
 import { swSend } from '../lib/sw';
 
-import OtpInput from '../components/OtpInput';
 import Avatar, { getInitials } from '../components/Avatar';
 
 import type { JoinedRoom } from '../types';
@@ -95,13 +94,12 @@ export default function Dashboard() {
         return;
       }
       const roomData = snap.data();
-      const roomName = roomData?.name || `Room ${code}`;
+      const roomName = roomData?.name || `Room ${name}`;
       if (user) {
         await setDoc(doc(db, 'rooms', name, 'members', user.uid), { joinedAt: serverTimestamp(), name: user.name });
       }
-      const roomData = snap.data();
       const room: JoinedRoom = {
-        code,
+        code: name,
         name: roomName,
         joinedAt: Date.now(),
         lastReadTimestamp: Date.now(),
@@ -152,19 +150,17 @@ export default function Dashboard() {
         displayName: roomName.trim(),
       });
       if (user) {
-        await setDoc(doc(db, 'rooms', name, 'members', user.uid), { joinedAt: serverTimestamp(), name: user.name });
+        await setDoc(doc(db, 'rooms', newCode, 'members', user.uid), { joinedAt: serverTimestamp(), name: user.name });
       }
       const room: JoinedRoom = {
-
         code: newCode,
         name: finalName,
-
         joinedAt: Date.now(),
         lastReadTimestamp: Date.now(),
       };
       await localDB.joinedRooms.put(room);
       addJoinedRoom(room);
-      navigate(`/chat/${name}`);
+      navigate(`/chat/${newCode}`);
     } catch {
       setError('Failed to create room');
     }
@@ -449,7 +445,7 @@ function RoomItem({
     const unsub = onSnapshot(doc(db, 'rooms', room.code), (snap) => {
       if (snap.exists()) {
         const data = snap.data();
-        if (data.displayName) setDisplayName(data.displayName);
+        if (data.name) setRoomName(data.name);
       }
     });
     return unsub;

@@ -20,7 +20,6 @@ import { db } from '../lib/firebase';
 import { deriveKey, encrypt, decrypt } from '../lib/crypto';
 import { localDB } from '../lib/db';
 import { swSend } from '../lib/sw';
-import { localDB } from '../lib/db';
 import { useStore } from '../store/useStore';
 import Avatar from '../components/Avatar';
 import EmojiPicker from '../components/EmojiPicker';
@@ -467,24 +466,6 @@ export default function ChatScreen() {
       await updateDoc(doc(db, 'rooms', code, 'messages', msgId), { deleted: true });
     } catch {}
     setMenuMsgId(null);
-  };
-
-  const startRename = () => {
-    setRenameInput(displayName);
-    setRenaming(true);
-  };
-
-  const saveRename = async () => {
-    const trimmed = renameInput.trim();
-    if (!trimmed || !code) {
-      setRenaming(false);
-      return;
-    }
-    try {
-      await updateDoc(doc(db, 'rooms', code), { displayName: trimmed });
-      await localDB.joinedRooms.update(code, { displayName: trimmed });
-    } catch {}
-    setRenaming(false);
   };
 
   const toggleReaction = async (msgId: string, emoji: string) => {
