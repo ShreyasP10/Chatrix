@@ -264,7 +264,7 @@ This approach works on the free Spark plan without any backend server.
 
 ## Collaborators
 
-- [Shreyas Pawar](https://github.com/ShreyasP) — Frontend development, UI/UX design,  WebRTC integration
+- [Shreyas Pawar](https://github.com/ShreyasP10) — Frontend development, UI/UX design,  WebRTC integration
 - [Atharva Mahajan](https://github.com/mahajanatharva1042) — Backend Development, Voice call implementation, feature development
 
 ## License
