@@ -20,10 +20,17 @@ export interface ReplyTo {
   text: string;
 }
 
+export interface FileInfo {
+  name: string;
+  size: number;
+  mimeType: string;
+}
+
 export interface EncryptedPayload {
   text: string;
-  type?: 'text' | 'image' | 'gif';
+  type?: 'text' | 'image' | 'file';
   replyTo?: { messageId: string; senderName: string; text: string };
+  file?: FileInfo;
 }
 
 export interface DecryptedMessage {
@@ -31,7 +38,8 @@ export interface DecryptedMessage {
   senderUid: string;
   senderName: string;
   text: string;
-  type?: 'text' | 'image' | 'gif';
+  type?: 'text' | 'image' | 'file';
+  file?: FileInfo;
   replyTo?: ReplyTo;
   edited?: boolean;
   deleted?: boolean;

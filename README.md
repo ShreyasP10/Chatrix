@@ -13,6 +13,7 @@ Zero-login, real-time group chat with end-to-end-like encryption. No account cre
 - **Voice calls** — WebRTC peer-to-peer voice calls with Firestore-based signaling
 - **Push notifications** — service worker watches Firestore directly; no Cloud Functions (Blaze) required
 - **Reply / @mentions** — reply to specific messages, tag users with `@name`, highlighted in green
+
 - **Emoji picker** — built-in emoji selector with 96 emojis and search
 - **Message reactions** — react to messages with emojis
 - **Message editing & deletion** — edit or delete your own messages

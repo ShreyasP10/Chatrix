@@ -21,6 +21,13 @@ const ICE_SERVERS: RTCIceServer[] = [
   { urls: 'stun:stun1.l.google.com:19302' },
 ];
 
+function setOpusBitrate(sdp: string, bitrate: number = 64000): string {
+  return sdp.replace(/a=fmtp:111 (.*)\r\n/g, (match, params) => {
+    if (params.includes('maxaveragebitrate')) return match;
+    return `a=fmtp:111 ${params};maxaveragebitrate=${bitrate}\r\n`;
+  });
+}
+
 export function useVoiceCall(roomCode: string | undefined) {
   const {
     user,
@@ -223,6 +230,7 @@ export function useVoiceCall(roomCode: string | undefined) {
       try {
         await pc.setRemoteDescription(new RTCSessionDescription(JSON.parse(offerSdp)));
         const answer = await pc.createAnswer();
+        answer.sdp = setOpusBitrate(answer.sdp!);
         await pc.setLocalDescription(answer);
 
         const pairRef = doc(db, 'rooms', roomCode, 'calls', 'current', 'p2p', pairId);
@@ -250,6 +258,7 @@ export function useVoiceCall(roomCode: string | undefined) {
 
       try {
         const offer = await pc.createOffer();
+        offer.sdp = setOpusBitrate(offer.sdp!);
         await pc.setLocalDescription(offer);
         await setDoc(pairRef, {
           uidA: user.uid,
@@ -319,7 +328,14 @@ export function useVoiceCall(roomCode: string | undefined) {
     try {
       let stream: MediaStream;
       try {
-        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            sampleRate: 48000,
+            channelCount: 1,
+          },
+        });
       } catch {
         connectingRef.current = false;
         return;

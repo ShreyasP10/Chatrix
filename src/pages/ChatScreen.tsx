@@ -20,13 +20,12 @@ import { db } from '../lib/firebase';
 import { deriveKey, encrypt, decrypt } from '../lib/crypto';
 import { localDB } from '../lib/db';
 import { swSend } from '../lib/sw';
-import { localDB } from '../lib/db';
 import { useStore } from '../store/useStore';
 import Avatar from '../components/Avatar';
 import EmojiPicker from '../components/EmojiPicker';
 import VoiceCallUI from '../components/VoiceCallUI';
 import { useVoiceCall } from '../hooks/useVoiceCall';
-import type { DecryptedMessage, ReplyTo, TypingUser } from '../types';
+import type { DecryptedMessage, ReplyTo, TypingUser, FileInfo } from '../types';
 
 const PAGE_SIZE = 50;
 const TYPING_TIMEOUT = 2000;
@@ -469,24 +468,6 @@ export default function ChatScreen() {
     setMenuMsgId(null);
   };
 
-  const startRename = () => {
-    setRenameInput(displayName);
-    setRenaming(true);
-  };
-
-  const saveRename = async () => {
-    const trimmed = renameInput.trim();
-    if (!trimmed || !code) {
-      setRenaming(false);
-      return;
-    }
-    try {
-      await updateDoc(doc(db, 'rooms', code), { displayName: trimmed });
-      await localDB.joinedRooms.update(code, { displayName: trimmed });
-    } catch {}
-    setRenaming(false);
-  };
-
   const toggleReaction = async (msgId: string, emoji: string) => {
     if (!code || !user) return;
     const msgRef = doc(db, 'rooms', code, 'messages', msgId);
@@ -520,18 +501,31 @@ export default function ChatScreen() {
     });
   };
 
-  const handleImageSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const MAX_FILE_SIZE = 700_000; // ~700KB raw file max (fits in 1MB Firestore doc after base64)
+
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || !code || !cryptoKey || !user || sending) return;
-    if (!file.type.startsWith('image/')) return;
     setSending(true);
 
     try {
       let dataUrl = await fileToDataUrl(file);
-      if (dataUrl.length > 900_000) {
-        dataUrl = await compressImage(dataUrl, 800);
+      if (dataUrl.length > MAX_FILE_SIZE) {
+        if (file.type.startsWith('image/')) {
+          dataUrl = await compressImage(dataUrl, 800);
+        }
+        if (dataUrl.length > MAX_FILE_SIZE) {
+          alert(`File too large. Maximum size is ~${Math.round(MAX_FILE_SIZE / 1000)}KB.`);
+          setSending(false);
+          if (e.target) e.target.value = '';
+          return;
+        }
       }
-      const payload = { text: dataUrl, type: 'image' };
+      const isImage = file.type.startsWith('image/');
+      const payload: any = { text: dataUrl, type: isImage ? 'image' : 'file' };
+      if (!isImage) {
+        payload.file = { name: file.name, size: file.size, mimeType: file.type };
+      }
       const { ciphertext, iv } = await encrypt(JSON.stringify(payload), cryptoKey);
       await addDoc(collection(db, 'rooms', code, 'messages'), {
         senderUid: user.uid,
@@ -798,7 +792,7 @@ export default function ChatScreen() {
           <button
             onClick={() => fileInputRef.current?.click()}
             className="text-[#555] hover:text-white shrink-0 transition-colors p-1 rounded-lg hover:bg-white/5"
-            title="Attach image"
+            title="Attach file"
             disabled={sending}
           >
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
@@ -808,8 +802,7 @@ export default function ChatScreen() {
           <input
             ref={fileInputRef}
             type="file"
-            accept="image/*"
-            onChange={handleImageSelect}
+            onChange={handleFileSelect}
             className="hidden"
           />
           <input
@@ -918,6 +911,7 @@ async function decryptMessage(data: any, id: string, key: CryptoKey): Promise<De
       senderName: data.senderName,
       text: parsed.text || parsed,
       type: parsed.type || 'text',
+      file: parsed.file || undefined,
       replyTo: parsed.replyTo || undefined,
       edited: data.edited || false,
       deleted: data.deleted || false,
@@ -1016,6 +1010,7 @@ const MessageItem = memo(function MessageItem({
 }) {
   const [hoveredReaction, setHoveredReaction] = useState<string | null>(null);
   const isImage = msg.type === 'image';
+  const isFile = msg.type === 'file';
   return (
     <div className={`flex flex-col ${isOwn ? 'items-end' : 'items-start'} ${prevSenderSame ? 'mt-0.5' : 'mt-2'}`}>
       {msg.deleted ? (
@@ -1045,7 +1040,7 @@ const MessageItem = memo(function MessageItem({
             </div>
           )}
 
-          <div className={`relative group ${isImage ? '' : 'max-w-full'}`}>
+          <div className={`relative group ${isImage || isFile ? '' : 'max-w-full'}`}>
             {isImage ? (
               <div
                 className={`max-w-full rounded-2xl overflow-hidden border border-[#333]/50 shadow-lg ${
@@ -1059,6 +1054,32 @@ const MessageItem = memo(function MessageItem({
                   loading="lazy"
                 />
               </div>
+            ) : isFile ? (
+              <a
+                href={msg.text}
+                download={msg.file?.name || 'file'}
+                className={`flex items-center gap-3 px-4 py-3 rounded-2xl border transition-colors shadow-sm ${
+                  isOwn
+                    ? 'bg-[#007AFF] text-white border-[#007AFF]/50 rounded-br-sm hover:bg-[#0066DD]'
+                    : 'bg-[#1C1C1E] text-[#E5E5E5] border-[#2A2A2A] rounded-bl-sm hover:bg-[#252525]'
+                }`}
+                title="Download file"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-8 h-8 shrink-0 opacity-80">
+                  <path d="M12 1.5a.75.75 0 0 1 .75.75v7.5a.75.75 0 0 1-1.5 0v-7.5A.75.75 0 0 1 12 1.5ZM11.25 9.75v-.75h1.5v.75h-1.5Z" />
+                  <path fillRule="evenodd" d="M4.5 9.75a6 6 0 0 1 11.573-2.226 3.75 3.75 0 0 1 4.133 4.303A4.5 4.5 0 0 1 18 20.25H6.75a5.25 5.25 0 0 1-2.23-10.04A6.02 6.02 0 0 1 4.5 9.75Zm4.5 4.5a.75.75 0 0 0 0 1.5h6a.75.75 0 0 0 0-1.5H9Zm0 3a.75.75 0 0 0 0 1.5h4a.75.75 0 0 0 0-1.5H9Z" clipRule="evenodd" />
+                </svg>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-medium truncate">{msg.file?.name || 'File'}</p>
+                  <p className={`text-xs mt-0.5 ${isOwn ? 'text-white/60' : 'text-[#777]'}`}>
+                    {formatFileSize(msg.file?.size || 0)}
+                  </p>
+                </div>
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className={`w-5 h-5 shrink-0 ${isOwn ? 'text-white/70' : 'text-[#666]'}`}>
+                  <path d="M10.75 2.75a.75.75 0 0 0-1.5 0v8.614L6.295 8.235a.75.75 0 1 0-1.09 1.03l4.25 4.5a.75.75 0 0 0 1.09 0l4.25-4.5a.75.75 0 0 0-1.09-1.03l-2.955 3.129V2.75Z" />
+                  <path d="M3.5 12.75a.75.75 0 0 0-1.5 0v2.5A2.75 2.75 0 0 0 4.75 18h10.5A2.75 2.75 0 0 0 18 15.25v-2.5a.75.75 0 0 0-1.5 0v2.5c0 .69-.56 1.25-1.25 1.25H4.75c-.69 0-1.25-.56-1.25-1.25v-2.5Z" />
+                </svg>
+              </a>
             ) : (
               <div
                 className={`max-w-full px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed break-words shadow-sm ${
@@ -1175,6 +1196,12 @@ const MessageItem = memo(function MessageItem({
     </div>
   );
 });
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+}
 
 function fileToDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
