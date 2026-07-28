@@ -10,6 +10,7 @@ Zero-login, real-time group chat with end-to-end-like encryption. No account cre
 - **Real-time messaging** — Firestore `onSnapshot` listeners for instant updates
 - **Push notifications** — service worker watches Firestore directly; no Cloud Functions (Blaze) required
 - **Reply / @mentions** — reply to specific messages, tag users with `@name`, highlighted in green
+- **File sharing** — share images, PDFs, documents, and other files via encrypted data URLs (end-to-end encrypted like all messages)
 - **Typing indicators** — see who's typing in real-time
 - **Avatars** — auto-generated initials with hash-based background colors
 - **Room history** — infinite scroll pagination, all previous messages loaded on enter
@@ -214,7 +215,7 @@ This approach works on the free Spark plan without any backend server.
 - 4-digit room codes = 9000 possible rooms. Brute-forceable — acknowledged trade-off
 - Encryption key derived from room code. Anyone with the code can read all messages
 - No message editing or deletion
-- No file/image sharing (future scope)
+- File sharing limited to ~700KB per file (Firestore 1MB document limit after base64 encoding)
 - Offline message queuing not implemented (future scope)
 - iOS push notification support limited by platform PWA restrictions
 
