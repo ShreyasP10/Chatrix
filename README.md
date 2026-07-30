@@ -21,7 +21,7 @@ Zero-login, real-time group chat with end-to-end-like encryption. No account cre
 - **Avatars** — auto-generated initials with hash-based background colors
 - **Room history** — infinite scroll pagination, all previous messages loaded on enter
 - **Room name editing** — rename rooms inline with real-time sync
-- **Member list** — view all members and their online status
+- **Member list** — view all members and their online status with search/filter
 - **Pure black UI** — dark, distraction-free ChatGPT-style interface
 - **Installable PWA** — add to home screen, standalone mode
 - **Vercel Analytics** — privacy-friendly analytics
@@ -97,7 +97,11 @@ service cloud.firestore {
 
 > **Note:** The app uses client-side encryption so message content is never exposed to the server. These permissive rules are acceptable for the encryption model. For production, consider restricting by path.
 
-### 5. Run
+### 5. Ad-blocker note
+
+Some browser extensions block Firestore long-polling connections. If you see `ERR_BLOCKED_BY_CLIENT` in the console, add `localhost` and `firestore.googleapis.com` to your ad blocker's allowlist, or use `initializeFirestore` with `experimentalAutoDetectLongPolling: true` (already configured).
+
+### 6. Run
 
 ```bash
 npm run dev        # Development server (http://localhost:5173)
