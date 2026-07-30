@@ -55,6 +55,7 @@ export default function ChatScreen() {
   const [roomNameInput, setRoomNameInput] = useState('');
   const [memberList, setMemberList] = useState<{ name: string; uid: string; online?: boolean }[]>([]);
 
+  const [memberSearch, setMemberSearch] = useState('');
   const [mentionQuery, setMentionQuery] = useState('');
   const [mentionStartIndex, setMentionStartIndex] = useState(-1);
   const [mentionSelectedIndex, setMentionSelectedIndex] = useState(0);
@@ -119,10 +120,13 @@ export default function ChatScreen() {
       const map: Record<string, string> = {};
       const list: { uid: string; name: string; online: boolean }[] = [];
       let onlineCount = 0;
+      const now = Date.now();
       snap.forEach((d) => {
         const data = d.data();
         if (data.name) {
-          const isOnline = data.online === true;
+          const lastSeen = data.lastSeen?.toMillis?.() ?? 0;
+          const stale = now - lastSeen > 70000;
+          const isOnline = data.online === true && !stale;
           map[data.name.toLowerCase()] = d.id;
           list.push({ name: data.name, uid: d.id, online: isOnline });
           if (isOnline) onlineCount++;
@@ -159,13 +163,25 @@ export default function ChatScreen() {
   useEffect(() => {
     if (!code || !user) return;
     const memberRef = doc(db, 'rooms', code, 'members', user.uid);
-    setDoc(memberRef, { online: true, lastSeen: serverTimestamp() }, { merge: true });
-    const interval = setInterval(() => {
-      setDoc(memberRef, { lastSeen: serverTimestamp() }, { merge: true });
-    }, 30000);
+
+    const setOnline = () => {
+      setDoc(memberRef, { online: true, lastSeen: serverTimestamp() }, { merge: true }).catch(() => {});
+    };
+
+    const setOffline = () => {
+      setDoc(memberRef, { online: false }, { merge: true }).catch(() => {});
+    };
+
+    setOnline();
+
+    const interval = setInterval(setOnline, 30000);
+
+    window.addEventListener('beforeunload', setOffline);
+
     return () => {
       clearInterval(interval);
-      setDoc(memberRef, { online: false }, { merge: true }).catch(() => {});
+      window.removeEventListener('beforeunload', setOffline);
+      setOffline();
     };
   }, [code, user]);
 
@@ -635,21 +651,46 @@ export default function ChatScreen() {
 
         {showMembers && (
           <>
-            <div className="fixed inset-0 z-20 bg-black/70 backdrop-blur-sm" onClick={() => setShowMembers(false)} />
-            <div className="fixed inset-0 z-30 flex items-center justify-center p-6 pointer-events-none" onClick={() => setShowMembers(false)}>
+            <div className="fixed inset-0 z-20 bg-black/70 backdrop-blur-sm" onClick={() => { setShowMembers(false); setMemberSearch(''); }} />
+            <div className="fixed inset-0 z-30 flex items-center justify-center p-6 pointer-events-none" onClick={() => { setShowMembers(false); setMemberSearch(''); }}>
               <div className="bg-[#1C1C1E] border border-[#333] rounded-2xl w-full max-w-sm shadow-2xl pointer-events-auto animate-fade-in overflow-hidden" onClick={(e) => e.stopPropagation()}>
                 <div className="flex items-center justify-between px-5 py-4 border-b border-[#333]">
                   <h2 className="text-sm font-semibold text-white">Members <span className="text-[#555] font-normal">({memberCount})</span></h2>
-                  <button onClick={() => setShowMembers(false)} className="text-[#555] hover:text-white p-1.5 rounded-lg hover:bg-white/5 transition-all">
+                  <button onClick={() => { setShowMembers(false); setMemberSearch(''); }} className="text-[#555] hover:text-white p-1.5 rounded-lg hover:bg-white/5 transition-all">
                     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4"><path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z" /></svg>
                   </button>
+                </div>
+                <div className="px-4 pt-3 pb-1">
+                  <div className="flex items-center gap-2 bg-[#0D0D0D] rounded-xl px-3 py-2 border border-[#333] focus-within:border-[#555] transition-colors">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 text-[#555] shrink-0">
+                      <path fillRule="evenodd" d="M9 3.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11ZM2 9a7 7 0 1 1 12.452 4.391l3.328 3.329a.75.75 0 1 1-1.06 1.06l-3.329-3.328A7 7 0 0 1 2 9Z" clipRule="evenodd" />
+                    </svg>
+                    <input
+                      type="text"
+                      value={memberSearch}
+                      onChange={(e) => setMemberSearch(e.target.value)}
+                      placeholder="Search members..."
+                      className="flex-1 bg-transparent text-white text-sm placeholder-[#555] outline-none"
+                    />
+                    {memberSearch && (
+                      <button onClick={() => setMemberSearch('')} className="text-[#555] hover:text-white p-0.5 rounded">
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5"><path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z" /></svg>
+                      </button>
+                    )}
+                  </div>
                 </div>
                 <div className="max-h-72 overflow-y-auto p-2">
                   {memberList.length === 0 ? (
                     <p className="text-xs text-[#555] text-center py-8">No members</p>
                   ) : (
                     <div className="space-y-0.5">
-                      {memberList.map((m) => (
+                      {[...memberList]
+                        .sort((a, b) => {
+                          if (a.online !== b.online) return a.online ? -1 : 1;
+                          return a.name.localeCompare(b.name);
+                        })
+                        .filter((m) => m.name.toLowerCase().includes(memberSearch.toLowerCase()))
+                        .map((m) => (
                         <div key={m.uid} className="flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-white/[0.03] transition-colors">
                           <div className="relative shrink-0">
                             <div className="w-8 h-8 rounded-full bg-gradient-to-br from-[#007AFF]/30 to-[#5856D6]/30 text-[#007AFF] text-xs font-bold flex items-center justify-center">
