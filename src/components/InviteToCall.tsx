@@ -88,9 +88,9 @@ export default function InviteToCall({ roomCode, onInvite, onClose }: Props) {
                     className="w-7 h-7 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0"
                     style={{ backgroundColor: `hsl(${hashStr(m.name)}, 55%, 45%)` }}
                   >
-                    {m.name.charAt(0).toUpperCase()}
+                    {(m.name || '?').charAt(0).toUpperCase()}
                   </div>
-                  <span className="text-sm text-[#ccc] flex-1 truncate">{m.name}</span>
+                  <span className="text-sm text-[#ccc] flex-1 truncate">{m.name || 'Someone'}</span>
                   <button
                     onClick={() => handleInvite(m.uid, m.name)}
                     disabled={inviting === m.uid}
@@ -109,9 +109,10 @@ export default function InviteToCall({ roomCode, onInvite, onClose }: Props) {
 }
 
 function hashStr(name: string): number {
+  const safe = name || '?';
   let hash = 0;
-  for (let i = 0; i < name.length; i++) {
-    hash = name.charCodeAt(i) + ((hash << 5) - hash);
+  for (let i = 0; i < safe.length; i++) {
+    hash = safe.charCodeAt(i) + ((hash << 5) - hash);
   }
   return Math.abs(hash) % 360;
 }

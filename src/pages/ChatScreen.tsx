@@ -1567,7 +1567,7 @@ function MembersModal({
                           borderColor: m.online ? '#00FF88' : activityColor(m.lastSeen),
                         }}
                       >
-                        {m.name.charAt(0).toUpperCase()}
+                        {(m.name || '?').charAt(0).toUpperCase()}
                       </div>
                     </div>
                     <div className="flex-1 min-w-0">
@@ -2002,7 +2002,7 @@ async function decryptMessage(data: any, id: string, keys: Record<number, Crypto
     return {
       id,
       senderUid: data.senderUid,
-      senderName: data.senderName,
+      senderName: data.senderName || 'Someone',
       text: '',
       type: 'poll',
       poll: data.poll,
@@ -2015,7 +2015,7 @@ async function decryptMessage(data: any, id: string, keys: Record<number, Crypto
     return {
       id,
       senderUid: data.senderUid,
-      senderName: data.senderName,
+      senderName: data.senderName || 'Someone',
       text: '[Encrypted]',
       timestamp: data.timestamp?.toMillis() ?? Date.now(),
     };
@@ -2026,7 +2026,7 @@ async function decryptMessage(data: any, id: string, keys: Record<number, Crypto
     return {
       id,
       senderUid: data.senderUid,
-      senderName: data.senderName,
+      senderName: data.senderName || 'Someone',
       text: parsed.text || parsed,
       type: parsed.type || 'text',
       file: parsed.file || undefined,
@@ -2043,7 +2043,7 @@ async function decryptMessage(data: any, id: string, keys: Record<number, Crypto
     return {
       id,
       senderUid: data.senderUid,
-      senderName: data.senderName,
+      senderName: data.senderName || 'Someone',
       text: '[Decryption failed]',
       timestamp: data.timestamp?.toMillis() ?? Date.now(),
     };
@@ -2198,8 +2198,8 @@ function MentionDropdown({
               idx === selectedIndex ? 'bg-[#007AFF]/20 text-white' : 'text-[#B3B3B3] hover:bg-[#333]'
             }`}
           >
-            <Avatar name={member.name} size="sm" />
-            <span className="font-medium">@{member.name}</span>
+            <Avatar name={member.name || '?'} size="sm" />
+            <span className="font-medium">@{member.name || '?'}</span>
           </button>
         ))}
       </div>
@@ -2307,10 +2307,11 @@ const MessageItem = memo(function MessageItem({
               </div>
               <div className="space-y-1.5">
                 {msg.poll.options.map((opt, idx) => {
-                  const totalVotes = msg.poll!.options.reduce((s, o) => s + o.voters.length, 0);
-                  const count = opt.voters.length;
+                  const voters = Array.isArray(opt.voters) ? opt.voters : [];
+                  const totalVotes = msg.poll!.options.reduce((s, o) => s + (Array.isArray(o.voters) ? o.voters.length : 0), 0);
+                  const count = voters.length;
                   const pct = totalVotes > 0 ? Math.round((count / totalVotes) * 100) : 0;
-                  const voted = opt.voters.includes(userUid || '');
+                  const voted = voters.includes(userUid || '');
                   return (
                     <button
                       key={idx}
@@ -2338,7 +2339,7 @@ const MessageItem = memo(function MessageItem({
                 })}
               </div>
               <p className="text-[10px] text-[#555] mt-2.5">
-                {msg.poll.options.reduce((s, o) => s + o.voters.length, 0)} vote{msg.poll.options.reduce((s, o) => s + o.voters.length, 0) !== 1 ? 's' : ''} · tap to vote
+                {msg.poll.options.reduce((s, o) => s + (Array.isArray(o.voters) ? o.voters.length : 0), 0)} vote{msg.poll.options.reduce((s, o) => s + (Array.isArray(o.voters) ? o.voters.length : 0), 0) !== 1 ? 's' : ''} · tap to vote
               </p>
             </div>
           ) : (
@@ -2466,7 +2467,9 @@ const MessageItem = memo(function MessageItem({
 
           {msg.reactions && Object.keys(msg.reactions).length > 0 && (
             <div className={`flex flex-wrap gap-1 mt-1 ${isOwn ? 'justify-end' : 'justify-start'}`}>
-              {Object.entries(msg.reactions).map(([emoji, uids]) => (
+              {Object.entries(msg.reactions)
+                .filter(([, u]) => Array.isArray(u))
+                .map(([emoji, uids]) => (
                 <div key={emoji} className="relative">
                   <button
                     onClick={() => onToggleReaction(msg.id, emoji)}

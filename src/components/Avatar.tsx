@@ -5,7 +5,8 @@ interface AvatarProps {
 }
 
 export function getInitials(name: string): string {
-  const parts = name.trim().split(/\s+/);
+  const safe = (name || '?').trim();
+  const parts = safe.split(/\s+/);
   if (parts.length >= 2) {
     return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
   }
@@ -14,9 +15,10 @@ export function getInitials(name: string): string {
 }
 
 function hashColor(name: string): string {
+  const safe = name || '?';
   let hash = 0;
-  for (let i = 0; i < name.length; i++) {
-    hash = name.charCodeAt(i) + ((hash << 5) - hash);
+  for (let i = 0; i < safe.length; i++) {
+    hash = safe.charCodeAt(i) + ((hash << 5) - hash);
   }
   const h = Math.abs(hash) % 360;
   return `hsl(${h}, 55%, 45%)`;
@@ -29,13 +31,14 @@ const sizeMap = {
 };
 
 export default function Avatar({ name, size = 'md', className = '' }: AvatarProps) {
+  const safe = name || '?';
   return (
     <div
       className={`rounded-full flex items-center justify-center font-bold shrink-0 ${sizeMap[size]} ${className}`}
-      style={{ backgroundColor: hashColor(name) }}
-      title={name}
+      style={{ backgroundColor: hashColor(safe) }}
+      title={safe}
     >
-      {getInitials(name)}
+      {getInitials(safe)}
     </div>
   );
 }

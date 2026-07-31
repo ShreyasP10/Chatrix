@@ -9,6 +9,7 @@ export default defineConfig({
     tailwindcss(),
     VitePWA({
       registerType: 'autoUpdate',
+      injectRegister: 'disabled',
       strategies: 'injectManifest',
       srcDir: 'src',
       filename: 'sw.ts',

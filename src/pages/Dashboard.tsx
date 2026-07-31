@@ -605,9 +605,9 @@ function RoomItem({
 
 
   function hashColor(name: string) {
-
+    const safe = name || '?';
     let hash = 0;
-    for (let i = 0; i < name.length; i++) hash = name.charCodeAt(i) + ((hash << 5) - hash);
+    for (let i = 0; i < safe.length; i++) hash = safe.charCodeAt(i) + ((hash << 5) - hash);
     const h = Math.abs(hash) % 360;
     return `linear-gradient(135deg, hsl(${h}, 55%, 45%), hsl(${(h + 40) % 360}, 50%, 35%))`;
   }
@@ -650,7 +650,7 @@ function RoomItem({
           {preview ? (
             <>
               <span className={`${preview.senderUid === user?.uid ? 'text-[#007AFF]' : 'text-[#00FF88]'} font-medium`}>
-                {preview.senderUid === user?.uid ? 'You' : preview.senderName}
+                {preview.senderUid === user?.uid ? 'You' : (preview.senderName || 'Someone')}
               </span>
               <span className="text-[#444]">&middot;</span>
               <span>{preview.text === 'Image' ? '📷 Image' : preview.text}</span>

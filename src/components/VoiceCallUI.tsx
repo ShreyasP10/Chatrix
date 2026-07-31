@@ -69,9 +69,9 @@ export default function VoiceCallUI({
                         !p.muted ? 'ring-[#00FF88]' : 'ring-[#333]'
                       }`}
                       style={{ backgroundColor: `hsl(${hashStr(p.name)}, 55%, 45%)` }}
-                      title={`${p.name}${p.muted ? ' (muted)' : ''}`}
+                      title={`${p.name || 'Someone'}${p.muted ? ' (muted)' : ''}`}
                     >
-                      {p.name.charAt(0).toUpperCase()}
+                      {(p.name || '?').charAt(0).toUpperCase()}
                     </div>
                     {p.muted && (
                       <svg className="absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 text-red-400 bg-[#0D0D0D] rounded-full" viewBox="0 0 20 20" fill="currentColor">
@@ -200,9 +200,10 @@ function CallInvitationBanner({
 }
 
 function hashStr(name: string): number {
+  const safe = name || '?';
   let hash = 0;
-  for (let i = 0; i < name.length; i++) {
-    hash = name.charCodeAt(i) + ((hash << 5) - hash);
+  for (let i = 0; i < safe.length; i++) {
+    hash = safe.charCodeAt(i) + ((hash << 5) - hash);
   }
   return Math.abs(hash) % 360;
 }
