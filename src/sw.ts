@@ -199,7 +199,7 @@ function showNotif(
       { action: 'reply', title: '💬 Reply' },
       { action: 'open', title: 'Open' },
     ],
-  });
+  } as any);
 }
 
 let callNotifRoom: string | null = null;
@@ -216,7 +216,7 @@ function showCallNotification(roomCode: string, senderName?: string) {
     renotify: false,
     silent: true,
     actions: [{ action: 'open', title: 'Return to call' }],
-  });
+  } as any);
 }
 
 function closeCallNotification() {

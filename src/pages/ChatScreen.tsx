@@ -29,7 +29,7 @@ import EmojiPicker from '../components/EmojiPicker';
 import VoiceCallUI from '../components/VoiceCallUI';
 import { useVoiceCall } from '../hooks/useVoiceCall';
 import { QRCodeSVG } from 'qrcode.react';
-import type { DecryptedMessage, ReplyTo, TypingUser, FileInfo, RoomSettings } from '../types';
+import type { DecryptedMessage, ReplyTo, TypingUser, RoomSettings } from '../types';
 
 const PAGE_SIZE = 50;
 const TYPING_TIMEOUT = 2000;
@@ -727,7 +727,7 @@ export default function ChatScreen() {
         frozen: next.frozen === true,
         keyVersion: next.keyVersion ?? 0,
       });
-      setRoomSettings(next);
+      setRoomSettings(next as RoomSettings);
       showToast('Room settings saved');
     } catch {
       showToast('Failed to save settings');
@@ -1325,7 +1325,6 @@ export default function ChatScreen() {
 
       {showSettings && (
         <SettingsModal
-          roomCode={code || ''}
           roomName={roomName}
           isAdmin={!!user && user.uid === roomOwnerUid}
           settings={roomSettings}
@@ -1757,7 +1756,6 @@ function ShareModal({
 }
 
 function SettingsModal({
-  roomCode,
   roomName,
   isAdmin,
   settings,
@@ -1769,7 +1767,6 @@ function SettingsModal({
   onCreateInvite,
   onClose,
 }: {
-  roomCode: string;
   roomName: string;
   isAdmin: boolean;
   settings: RoomSettings | null;
