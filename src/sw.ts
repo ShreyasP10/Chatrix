@@ -81,6 +81,12 @@ self.addEventListener('message', (event) => {
       showNotif(event.data.roomCode, event.data.senderName,
         event.data.replyToUid, event.data.mentionedUids);
       break;
+    case 'CALL_ACTIVE':
+      showCallNotification(event.data.roomCode, event.data.senderName);
+      break;
+    case 'CALL_IDLE':
+      closeCallNotification();
+      break;
   }
 });
 
@@ -147,6 +153,17 @@ async function watchRooms(rooms: string[]) {
 
 // ─── Notification dispatch ─────────────────────────────────────
 
+function vibrateForRoom(roomCode: string) {
+  let seed = 0;
+  for (const ch of roomCode) seed = (seed * 31 + ch.charCodeAt(0)) >>> 0;
+  const patterns = [
+    [80, 40, 80],
+    [120, 50],
+    [40, 40, 40, 40, 120],
+  ];
+  return patterns[seed % patterns.length];
+}
+
 function showNotif(
   roomCode: string,
   senderName?: string,
@@ -175,7 +192,37 @@ function showNotif(
     badge: '/icons/icon-192.png',
     data: { roomCode, type: 'new_message' },
     tag: `chatrix-${roomCode}`,
+    vibrate: vibrateForRoom(roomCode),
+    actions: [
+      { action: 'reply', title: '💬 Reply' },
+      { action: 'open', title: 'Open' },
+    ],
   });
+}
+
+let callNotifRoom: string | null = null;
+
+function showCallNotification(roomCode: string, senderName?: string) {
+  if (roomCode === activeRoom) return;
+  callNotifRoom = roomCode;
+  self.registration.showNotification('🔊 Call in progress', {
+    body: `${senderName || 'Someone'} is in a voice call in #${roomCode}`,
+    icon: '/icons/icon-192.png',
+    badge: '/icons/icon-192.png',
+    data: { roomCode, type: 'call_active' },
+    tag: `chatrix-call-${roomCode}`,
+    renotify: false,
+    silent: true,
+    actions: [{ action: 'open', title: 'Return to call' }],
+  });
+}
+
+function closeCallNotification() {
+  if (!callNotifRoom) return;
+  self.registration.getNotifications({ tag: `chatrix-call-${callNotifRoom}` })
+    .then((notifs) => notifs.forEach((n) => n.close()))
+    .catch(() => {});
+  callNotifRoom = null;
 }
 
 // ─── FCM push (fallback) ───────────────────────────────────────
@@ -205,7 +252,9 @@ self.addEventListener('push', (event) => {
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
   const roomCode = event.notification.data?.roomCode;
-  const url = roomCode ? `/chat/${roomCode}` : '/';
+  const url = roomCode
+    ? `/chat/${roomCode}${event.action === 'reply' ? '?reply=1' : ''}`
+    : '/';
 
   event.waitUntil(
     self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clients) => {
@@ -213,6 +262,7 @@ self.addEventListener('notificationclick', (event) => {
         const clientUrl = new URL(client.url);
         const targetUrl = new URL(url, self.location.origin);
         if (clientUrl.pathname === targetUrl.pathname && 'focus' in client) {
+          client.postMessage({ type: 'FOCUS_INPUT' });
           return client.focus();
         }
       }

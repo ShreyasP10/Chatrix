@@ -20,7 +20,15 @@ function bufferToBase64(buffer: ArrayBuffer): string {
   return btoa(binary);
 }
 
-export async function deriveKey(roomCode: string): Promise<CryptoKey> {
+/**
+ * Derive the AES key for a room.
+ * `version` 0 = legacy salt (pre-rotation messages), 1+ = `chatrix-kv-<version>` salt.
+ */
+export async function deriveKey(roomCode: string, version: number = 0): Promise<CryptoKey> {
+  const salt = version <= 0
+    ? SALT
+    : new TextEncoder().encode(`chatrix-kv-${version}`);
+
   const keyMaterial = await crypto.subtle.importKey(
     'raw',
     new TextEncoder().encode(roomCode),
@@ -30,7 +38,7 @@ export async function deriveKey(roomCode: string): Promise<CryptoKey> {
   );
 
   return crypto.subtle.deriveKey(
-    { name: 'PBKDF2', salt: SALT, iterations: ITERATIONS, hash: 'SHA-256' },
+    { name: 'PBKDF2', salt, iterations: ITERATIONS, hash: 'SHA-256' },
     keyMaterial,
     { name: 'AES-GCM', length: KEY_LENGTH },
     false,
@@ -66,4 +74,19 @@ export async function decrypt(
     base64ToBuffer(ciphertext)
   );
   return new TextDecoder().decode(decrypted);
+}
+
+/**
+ * Room safety fingerprint ("message DNA"): 12 hex chars from SHA-256 of the
+ * room code, formatted like a safety number, e.g. "A1B2-C3D4-E5F6".
+ */
+export async function roomFingerprint(roomCode: string): Promise<string> {
+  const digest = await crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(`chatrix-room:${roomCode}`)
+  );
+  const bytes = new Uint8Array(digest).slice(0, 6);
+  let hex = '';
+  for (const b of bytes) hex += b.toString(16).padStart(2, '0');
+  return hex.toUpperCase().replace(/(.{4})(?=.)/g, '$1-');
 }

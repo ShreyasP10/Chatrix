@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef, useCallback, memo } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useState, useEffect, useRef, useCallback, memo, Fragment } from 'react';
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import {
   collection,
   query,
@@ -15,9 +15,12 @@ import {
   doc,
   setDoc,
   deleteDoc,
+  arrayUnion,
+  where,
 } from 'firebase/firestore';
 import { db } from '../lib/firebase';
-import { deriveKey, encrypt, decrypt } from '../lib/crypto';
+import { deriveKey, encrypt, decrypt, roomFingerprint } from '../lib/crypto';
+import { deleteRoomData } from '../lib/roomUtils';
 import { localDB } from '../lib/db';
 import { swSend } from '../lib/sw';
 import { useStore } from '../store/useStore';
@@ -25,19 +28,27 @@ import Avatar from '../components/Avatar';
 import EmojiPicker from '../components/EmojiPicker';
 import VoiceCallUI from '../components/VoiceCallUI';
 import { useVoiceCall } from '../hooks/useVoiceCall';
-import type { DecryptedMessage, ReplyTo, TypingUser, FileInfo } from '../types';
+import { QRCodeSVG } from 'qrcode.react';
+import type { DecryptedMessage, ReplyTo, TypingUser, FileInfo, RoomSettings } from '../types';
 
 const PAGE_SIZE = 50;
 const TYPING_TIMEOUT = 2000;
+const BURN_TTL = 30000;
 
 export default function ChatScreen() {
   const { code } = useParams<{ code: string }>();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const { user, messages, setMessages, callInvitations } = useStore();
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [cryptoKey, setCryptoKey] = useState<CryptoKey | null>(null);
+  const [keys, setKeys] = useState<Record<number, CryptoKey>>({});
+  const [roomKeyVersion, setRoomKeyVersion] = useState(0);
+  const [roomSettings, setRoomSettings] = useState<RoomSettings | null>(null);
+  const [fingerprint, setFingerprint] = useState('');
+  const [burnEnabled, setBurnEnabled] = useState(false);
+  const [tone, setTone] = useState<'pop' | 'ding' | 'soft' | 'none'>('pop');
   const [memberCount, setMemberCount] = useState<number | null>(null);
   const [onlineCount, setOnlineCount] = useState(0);
   const [replyTo, setReplyTo] = useState<ReplyTo | null>(null);
@@ -48,14 +59,23 @@ export default function ChatScreen() {
   const [reactingMsgId, setReactingMsgId] = useState<string | null>(null);
   const [showMembers, setShowMembers] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  const [showPollForm, setShowPollForm] = useState(false);
+  const [pollQuestion, setPollQuestion] = useState('');
+  const [pollOptions, setPollOptions] = useState(['', '']);
+  const [showSettings, setShowSettings] = useState(false);
+  const [showShare, setShowShare] = useState(false);
+  const [inviteLink, setInviteLink] = useState('');
+  const [toast, setToast] = useState('');
   const [roomReady, setRoomReady] = useState(false);
-  
+
   const [roomName, setRoomName] = useState('');
   const [editingRoomName, setEditingRoomName] = useState(false);
   const [roomNameInput, setRoomNameInput] = useState('');
-  const [memberList, setMemberList] = useState<{ name: string; uid: string; online?: boolean }[]>([]);
+  const [memberList, setMemberList] = useState<{ name: string; uid: string; online?: boolean; lastSeen?: number; lastSpokeAt?: number | null }[]>([]);
 
   const [memberSearch, setMemberSearch] = useState('');
+  const [roomOwnerUid, setRoomOwnerUid] = useState<string | null>(null);
+  const [kicked, setKicked] = useState(false);
   const [mentionQuery, setMentionQuery] = useState('');
   const [mentionStartIndex, setMentionStartIndex] = useState(-1);
   const [mentionSelectedIndex, setMentionSelectedIndex] = useState(0);
@@ -66,23 +86,65 @@ export default function ChatScreen() {
   const [loadingOlder, setLoadingOlder] = useState(false);
   const scrollAnchorRef = useRef<{ scrollHeight: number } | null>(null);
   const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const roomNameInputRef = useRef<HTMLInputElement>(null);
   const seenMsgIds = useRef<Set<string>>(new Set());
+  const burnScheduledRef = useRef<Set<string>>(new Set());
+  const lastReadSeqRef = useRef(0);
+  const myLastMsgTimeRef = useRef(0);
   const initialSnapshotDone = useRef(false);
   const userRef = useRef(user);
   userRef.current = user;
+  const toneRef = useRef(tone);
+  toneRef.current = tone;
+
+  const cryptoKey = keys[roomKeyVersion] ?? null;
+
+  const showToast = (msg: string) => {
+    setToast(msg);
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = setTimeout(() => setToast(''), 2500);
+  };
 
   const voiceCall = useVoiceCall(code);
 
   useEffect(() => {
     if (!code) return;
-    deriveKey(code).then(setCryptoKey);
-    // Tell SW this is the active room (suppress notifications for it)
+    let cancelled = false;
+    Promise.all([deriveKey(code, 0), deriveKey(code, 1), deriveKey(code, 2)])
+      .then(([k0, k1, k2]) => {
+        if (cancelled) return;
+        setKeys({ 0: k0, 1: k1, 2: k2 });
+      })
+      .catch(() => {});
+    roomFingerprint(code)
+      .then((fp) => { if (!cancelled) setFingerprint(fp); })
+      .catch(() => setFingerprint(''));
     swSend({ type: 'ACTIVE_ROOM', code });
-    return () => { swSend({ type: 'ACTIVE_ROOM', code: null }); };
+    return () => { cancelled = true; swSend({ type: 'ACTIVE_ROOM', code: null }); };
   }, [code]);
+
+  useEffect(() => {
+    if (!code || roomKeyVersion <= 2) return;
+    deriveKey(code, roomKeyVersion)
+      .then((k) => setKeys((prev) => ({ ...prev, [roomKeyVersion]: k })))
+      .catch(() => {});
+  }, [code, roomKeyVersion]);
+
+  useEffect(() => {
+    if (!code) return;
+    localDB.joinedRooms.get(code).then((r) => {
+      if (r?.tone) setTone(r.tone);
+    }).catch(() => {});
+  }, [code]);
+
+  useEffect(() => {
+    if (searchParams.get('reply') === '1') {
+      inputRef.current?.focus();
+    }
+  }, [searchParams]);
 
   useEffect(() => {
     if (!code || !user) return;
@@ -90,13 +152,38 @@ export default function ChatScreen() {
     const unsub = onSnapshot(doc(db, 'rooms', code), async (snap) => {
       if (!snap.exists()) {
 
-        await setDoc(doc(db, 'rooms', code), { name: `Room ${code}`, createdAt: serverTimestamp() });
+        await setDoc(doc(db, 'rooms', code), { name: `Room ${code}`, createdAt: serverTimestamp(), createdBy: user.uid });
         await setDoc(doc(db, 'rooms', code, 'members', user.uid), { joinedAt: serverTimestamp(), name: user.name });
         setRoomName(`Room ${code}`);
+        setRoomOwnerUid(user.uid);
       } else {
         const data = snap.data();
         const name = data.name || `Room ${code}`;
         setRoomName(name);
+        setRoomOwnerUid(data.createdBy || null);
+        setRoomSettings({
+          slowModeSec: data.slowModeSec || 0,
+          blockedWords: data.blockedWords || [],
+          frozen: data.frozen === true,
+          keyVersion: typeof data.keyVersion === 'number' ? data.keyVersion : 0,
+          autoDelete: data.autoDelete === true,
+          lastActivityAt: data.lastActivityAt?.toMillis?.() ?? null,
+          createdAt: data.createdAt?.toMillis?.() ?? Date.now(),
+        });
+        if (typeof data.keyVersion === 'number' && data.keyVersion > roomKeyVersion) {
+          setRoomKeyVersion(data.keyVersion);
+        }
+        // Auto-delete: remove room 1h after last activity
+        if (data.autoDelete === true) {
+          const lastActivity = data.lastActivityAt?.toMillis?.() ?? 0;
+          if (lastActivity > 0 && Date.now() - lastActivity > 3600000) {
+            deleteRoomData(code).then(() => {
+              localDB.joinedRooms.delete(code);
+              useStore.getState().removeJoinedRoom(code);
+              navigate('/');
+            }).catch(() => {});
+          }
+        }
         // Update local JoinedRoom name if needed
         const local = await localDB.joinedRooms.get(code);
         if (local && (!local.name || local.name !== data.name)) {
@@ -110,34 +197,73 @@ export default function ChatScreen() {
       setRoomReady(true);
     });
     return unsub;
-  }, [code, user]);
+  }, [code, user, roomKeyVersion]);
 
   useEffect(() => {
     if (!code) return;
     const q = query(collection(db, 'rooms', code, 'members'));
     const unsub = onSnapshot(q, (snap) => {
-      setMemberCount(snap.size);
       const map: Record<string, string> = {};
-      const list: { uid: string; name: string; online: boolean }[] = [];
+      const list: { uid: string; name: string; online: boolean; lastSeen: number; lastSpokeAt: number | null }[] = [];
       let onlineCount = 0;
+      let count = 0;
       const now = Date.now();
       snap.forEach((d) => {
         const data = d.data();
-        if (data.name) {
+        if (data.name && !data.kicked) {
+          // Stale cutoff (3 min) covers browser timer throttling in background
+          // tabs (~60s) plus a margin, while still clearing crash-stuck users.
           const lastSeen = data.lastSeen?.toMillis?.() ?? 0;
-          const stale = now - lastSeen > 70000;
+          const stale = now - lastSeen > 180000;
           const isOnline = data.online === true && !stale;
           map[data.name.toLowerCase()] = d.id;
-          list.push({ name: data.name, uid: d.id, online: isOnline });
+          list.push({
+            name: data.name,
+            uid: d.id,
+            online: isOnline,
+            lastSeen,
+            lastSpokeAt: data.lastSpokeAt?.toMillis?.() ?? null,
+          });
           if (isOnline) onlineCount++;
+          count++;
         }
       });
+      setMemberCount(count);
       setMemberNameMap(map);
       setMemberList(list);
       setOnlineCount(onlineCount);
     });
     return unsub;
   }, [code]);
+
+  // System feed: joins and removals
+  useEffect(() => {
+    if (!code || !user) return;
+    const q = query(collection(db, 'rooms', code, 'members'));
+    const unsub = onSnapshot(q, (snap) => {
+      snap.docChanges().forEach((change) => {
+        const uid = change.doc.id;
+        if (uid === user.uid) return;
+        const data = change.doc.data();
+        if (change.type === 'added') {
+          postSystemMessage(code, 'join', uid, data?.name || 'Someone');
+        } else if (change.type === 'modified' && data?.kicked === true) {
+          postSystemMessage(code, 'remove', uid, data?.name || 'Someone');
+        }
+      });
+    });
+    return unsub;
+  }, [code, user]);
+
+  useEffect(() => {
+    if (!code || !user) return;
+    const unsub = onSnapshot(doc(db, 'rooms', code, 'members', user.uid), (snap) => {
+      if (snap.exists() && snap.data()?.kicked === true) {
+        setKicked(true);
+      }
+    });
+    return unsub;
+  }, [code, user]);
 
   useEffect(() => {
     if (!code) return;
@@ -161,11 +287,15 @@ export default function ChatScreen() {
 
   // Presence heartbeat
   useEffect(() => {
-    if (!code || !user) return;
+    if (!code || !user || kicked) return;
     const memberRef = doc(db, 'rooms', code, 'members', user.uid);
 
     const setOnline = () => {
-      setDoc(memberRef, { online: true, lastSeen: serverTimestamp() }, { merge: true }).catch(() => {});
+      setDoc(
+        memberRef,
+        { online: true, name: user.name, lastSeen: serverTimestamp() },
+        { merge: true }
+      ).catch(() => {});
     };
 
     const setOffline = () => {
@@ -183,7 +313,7 @@ export default function ChatScreen() {
       window.removeEventListener('beforeunload', setOffline);
       setOffline();
     };
-  }, [code, user]);
+  }, [code, user, kicked]);
 
   useEffect(() => {
     if (!code || !cryptoKey || !roomReady) return;
@@ -201,6 +331,20 @@ export default function ChatScreen() {
       async (snap) => {
         const docs = snap.docs;
         const isHidden = document.hidden;
+        const now = Date.now();
+
+        // Burn-on-read: schedule deletion of burn messages
+        for (const change of snap.docChanges()) {
+          if (change.type !== 'added') continue;
+          const d = change.doc.data();
+          if (d.burn && d.timestamp?.toMillis && !burnScheduledRef.current.has(change.doc.id)) {
+            burnScheduledRef.current.add(change.doc.id);
+            const delay = Math.max(500, d.timestamp.toMillis() + BURN_TTL - now);
+            setTimeout(() => {
+              deleteDoc(doc(db, 'rooms', code, 'messages', change.doc.id)).catch(() => {});
+            }, delay);
+          }
+        }
 
         // Forward new messages from others to SW when page is backgrounded
         if (isHidden && userRef.current) {
@@ -235,8 +379,10 @@ export default function ChatScreen() {
             setLoading(false);
             return;
           }
+          const maxSeq = docs.reduce((m, d) => Math.max(m, d.data().seq || 0), 0);
+          lastReadSeqRef.current = maxSeq;
           const decrypted = await Promise.all(
-            docs.map(async (d) => decryptMessage(d.data(), d.id, cryptoKey))
+            docs.map(async (d) => decryptMessage(d.data(), d.id, keys))
           );
           setMessages(decrypted.reverse());
           setLoading(false);
@@ -244,8 +390,35 @@ export default function ChatScreen() {
           // Subsequent snapshots: merge changes, then re-sort by seq
           const changes = snap.docChanges().filter(c => c.type === 'added' || c.type === 'modified');
           if (changes.length === 0) return;
+
+          // Sound + haptics for new incoming messages (foreground only)
+          if (!isHidden && userRef.current && toneRef.current !== 'none') {
+            const hasIncoming = changes.some(
+              (c) => c.type === 'added' && c.doc.data().senderUid !== userRef.current?.uid && !c.doc.data().burn
+            );
+            if (hasIncoming) {
+              playIncomingFeedback(toneRef.current);
+            }
+          }
+
+          // Read receipts: mark new incoming messages as read
+          if (userRef.current) {
+            for (const c of changes) {
+              if (c.type !== 'added') continue;
+              const d = c.doc.data();
+              if (d.senderUid === userRef.current.uid) continue;
+              const seq = d.seq || 0;
+              if (seq > lastReadSeqRef.current && !d.burn) {
+                updateDoc(doc(db, 'rooms', code, 'messages', c.doc.id), {
+                  readers: arrayUnion(userRef.current.uid),
+                }).catch(() => {});
+              }
+              if (seq > lastReadSeqRef.current) lastReadSeqRef.current = seq;
+            }
+          }
+
           const updatedMsgs = await Promise.all(
-            changes.map(c => decryptMessage(c.doc.data(), c.doc.id, cryptoKey))
+            changes.map(c => decryptMessage(c.doc.data(), c.doc.id, keys))
           );
           setMessages((prev) => {
             const merged = [...prev];
@@ -263,7 +436,7 @@ export default function ChatScreen() {
     );
 
     return unsub;
-  }, [code, cryptoKey, roomReady, setMessages]);
+  }, [code, cryptoKey, roomReady, setMessages, keys]);
 
   useEffect(() => {
     if (loading || loadingOlder) return;
@@ -300,14 +473,14 @@ export default function ChatScreen() {
     setHasMore(docs.length >= PAGE_SIZE);
 
     const older = await Promise.all(
-      docs.map((d) => decryptMessage(d.data(), d.id, cryptoKey))
+      docs.map((d) => decryptMessage(d.data(), d.id, keys))
     );
 
     const el = messagesRef.current;
     if (el) scrollAnchorRef.current = { scrollHeight: el.scrollHeight };
     setMessages((prev) => [...older.reverse(), ...prev]);
     setLoadingOlder(false);
-  }, [code, cryptoKey, hasMore, loadingOlder, setMessages]);
+  }, [code, cryptoKey, hasMore, loadingOlder, setMessages, keys]);
 
   const updateTypingStatus = useCallback(
     (text: string) => {
@@ -417,6 +590,25 @@ export default function ChatScreen() {
   const sendMessage = async () => {
     const text = input.trim();
     if (!text || !code || !cryptoKey || !user || sending) return;
+
+    if (roomSettings?.frozen && user.uid !== roomOwnerUid) {
+      showToast('Room is frozen by the owner');
+      return;
+    }
+    const lower = text.toLowerCase();
+    const blocked = (roomSettings?.blockedWords || []).find((w) => w && lower.includes(w.toLowerCase()));
+    if (blocked) {
+      showToast(`Message blocked (filtered word: "${blocked}")`);
+      return;
+    }
+    if (roomSettings?.slowModeSec && roomSettings.slowModeSec > 0 && myLastMsgTimeRef.current) {
+      const wait = roomSettings.slowModeSec - (Date.now() - myLastMsgTimeRef.current) / 1000;
+      if (wait > 0) {
+        showToast(`Slow mode: wait ${Math.ceil(wait)}s`);
+        return;
+      }
+    }
+
     setSending(true);
     setInput('');
 
@@ -426,6 +618,7 @@ export default function ChatScreen() {
       senderName: user.name,
       timestamp: serverTimestamp(),
       seq: Date.now(),
+      kv: roomKeyVersion,
     };
 
     if (replyTo) {
@@ -436,6 +629,10 @@ export default function ChatScreen() {
     const mentionedUids = parseMentions(text, memberNameMap);
     if (mentionedUids.length > 0) {
       msgData.mentionedUids = mentionedUids;
+    }
+
+    if (burnEnabled) {
+      msgData.burn = true;
     }
 
     try {
@@ -451,6 +648,11 @@ export default function ChatScreen() {
         await addDoc(collection(db, 'rooms', code, 'messages'), msgData);
       }
 
+      myLastMsgTimeRef.current = Date.now();
+      // Activity tracking for auto-delete + lurker detection
+      updateDoc(doc(db, 'rooms', code), { lastActivityAt: serverTimestamp() }).catch(() => {});
+      updateDoc(doc(db, 'rooms', code, 'members', user.uid), { lastSpokeAt: serverTimestamp() }).catch(() => {});
+
       setReplyTo(null);
       setMentionQuery('');
       setMentionStartIndex(-1);
@@ -459,6 +661,125 @@ export default function ChatScreen() {
       setInput(text);
     }
     setSending(false);
+  };
+
+  const sendPoll = async () => {
+    if (!code || !user) return;
+    const options = pollOptions.map((o) => o.trim()).filter(Boolean).slice(0, 6);
+    const question = pollQuestion.trim();
+    if (options.length < 2) {
+      showToast('A poll needs at least 2 options');
+      return;
+    }
+    if (!question) {
+      showToast('Add a question for the poll');
+      return;
+    }
+    if (roomSettings?.frozen && user.uid !== roomOwnerUid) {
+      showToast('Room is frozen by the owner');
+      return;
+    }
+    try {
+      await addDoc(collection(db, 'rooms', code, 'messages'), {
+        senderUid: user.uid,
+        senderName: user.name,
+        timestamp: serverTimestamp(),
+        seq: Date.now(),
+        poll: {
+          question,
+          multiple: false,
+          options: options.map((text) => ({ text, voters: [] })),
+        },
+      });
+      updateDoc(doc(db, 'rooms', code), { lastActivityAt: serverTimestamp() }).catch(() => {});
+      updateDoc(doc(db, 'rooms', code, 'members', user.uid), { lastSpokeAt: serverTimestamp() }).catch(() => {});
+      setShowPollForm(false);
+      setPollQuestion('');
+      setPollOptions(['', '']);
+    } catch {
+      showToast('Failed to create poll');
+    }
+  };
+
+  const votePoll = async (msgId: string, optionIndex: number) => {
+    if (!code || !user) return;
+    const msg = messages.find((m) => m.id === msgId);
+    if (!msg?.poll) return;
+    const options = msg.poll.options.map((o) => ({ text: o.text, voters: [...o.voters] }));
+    const voters = options[optionIndex].voters;
+    const i = voters.indexOf(user.uid);
+    if (i >= 0) voters.splice(i, 1);
+    else voters.push(user.uid);
+    try {
+      await updateDoc(doc(db, 'rooms', code, 'messages', msgId), {
+        poll: { question: msg.poll.question, multiple: msg.poll.multiple, options },
+      });
+    } catch {}
+  };
+
+  const saveSettings = async (patch: Partial<RoomSettings>) => {
+    if (!code) return;
+    const next = { ...(roomSettings || {}), ...patch };
+    try {
+      await updateDoc(doc(db, 'rooms', code), {
+        slowModeSec: next.slowModeSec || 0,
+        blockedWords: next.blockedWords || [],
+        frozen: next.frozen === true,
+        keyVersion: next.keyVersion ?? 0,
+      });
+      setRoomSettings(next);
+      showToast('Room settings saved');
+    } catch {
+      showToast('Failed to save settings');
+    }
+  };
+
+  const rotateKey = async () => {
+    if (!code) return;
+    const next = (roomSettings?.keyVersion ?? 0) + 1;
+    try {
+      await updateDoc(doc(db, 'rooms', code), { keyVersion: next });
+      setRoomKeyVersion((v) => (next > v ? next : v));
+      showToast('Encryption key rotated');
+    } catch {
+      showToast('Failed to rotate key');
+    }
+  };
+
+  const createInvite = async () => {
+    if (!code || !user) return;
+    try {
+      const token = Array.from(crypto.getRandomValues(new Uint8Array(8)))
+        .map((b) => b.toString(16).padStart(2, '0')).join('');
+      await setDoc(doc(db, 'rooms', code, 'invites', token), {
+        expiresAt: new Date(Date.now() + 24 * 3600 * 1000),
+        uses: 0,
+        maxUses: 1,
+        createdBy: user.uid,
+        createdAt: serverTimestamp(),
+      });
+      const link = `${window.location.origin}/?code=${code}&invite=${token}`;
+      setInviteLink(link);
+      try {
+        await navigator.clipboard.writeText(link);
+        showToast('Invite link copied!');
+      } catch {
+        showToast('Invite link created');
+      }
+    } catch {
+      showToast('Failed to create invite');
+    }
+  };
+
+  const setToneAndSave = async (t: 'pop' | 'ding' | 'soft' | 'none') => {
+    setTone(t);
+    if (!code) return;
+    const local = await localDB.joinedRooms.get(code);
+    await localDB.joinedRooms.put({ ...(local || { code, name: roomName, joinedAt: Date.now(), lastReadTimestamp: null }), tone: t });
+    useStore.getState().setJoinedRooms(
+      useStore.getState().joinedRooms.map((r) => r.code === code ? { ...r, tone: t } : r)
+    );
+    if (t !== 'none') playTone(t);
   };
 
   const handleEdit = (msg: DecryptedMessage) => {
@@ -483,6 +804,17 @@ export default function ChatScreen() {
     } catch {}
     setMenuMsgId(null);
   };
+
+  const removeMember = useCallback(async (uid: string) => {
+    if (!code || !user || user.uid !== roomOwnerUid) return;
+    try {
+      await updateDoc(doc(db, 'rooms', code, 'members', uid), {
+        kicked: true,
+        kickedAt: serverTimestamp(),
+      });
+      await deleteDoc(doc(db, 'rooms', code, 'typing', uid)).catch(() => {});
+    } catch {}
+  }, [code, user, roomOwnerUid]);
 
   const toggleReaction = async (msgId: string, emoji: string) => {
     if (!code || !user) return;
@@ -550,15 +882,30 @@ export default function ChatScreen() {
         iv,
         timestamp: serverTimestamp(),
         seq: Date.now(),
+        kv: roomKeyVersion,
       });
+      updateDoc(doc(db, 'rooms', code), { lastActivityAt: serverTimestamp() }).catch(() => {});
+      updateDoc(doc(db, 'rooms', code, 'members', user.uid), { lastSpokeAt: serverTimestamp() }).catch(() => {});
     } catch {}
     setSending(false);
     if (e.target) e.target.value = '';
   };
 
   const formatTime = (ts: number) => {
+    return new Date(ts).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  };
+
+  const formatMessageTime = (ts: number) => {
     const d = new Date(ts);
-    return d.getHours().toString().padStart(2, '0') + ':' + d.getMinutes().toString().padStart(2, '0');
+    const now = new Date();
+    const sameDay = dayKey(d) === dayKey(now);
+    if (sameDay) return formatTime(ts);
+    const sameYear = d.getFullYear() === now.getFullYear();
+    return d.toLocaleDateString(undefined, {
+      month: 'short',
+      day: 'numeric',
+      ...(sameYear ? {} : { year: 'numeric' }),
+    }) + ' · ' + formatTime(ts);
   };
 
   const typingText = typingUsers.length === 0
@@ -570,7 +917,7 @@ export default function ChatScreen() {
         : `${typingUsers[0].name} and ${typingUsers.length - 1} others are typing...`;
 
   return (
-    <div className="flex flex-col h-dvh max-w-md md:max-w-lg lg:max-w-xl mx-auto" style={{ background: 'radial-gradient(ellipse at 50% 0%, #0a0a0f 0%, #000 70%)' }}>
+    <div className={`flex flex-col h-dvh max-w-md md:max-w-lg lg:max-w-xl mx-auto ${voiceCall.inCall ? 'pb-[58px]' : ''}`} style={{ background: 'radial-gradient(ellipse at 50% 0%, #0a0a0f 0%, #000 70%)' }}>
       <header className="flex items-center gap-3 px-4 py-3 border-b border-[#222] shrink-0 bg-black/50 backdrop-blur-sm">
         <button onClick={() => navigate('/')} className="text-[#007AFF] font-medium text-sm shrink-0 hover:opacity-80 transition-opacity">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 inline-block -ml-1">
@@ -611,7 +958,7 @@ export default function ChatScreen() {
             </div>
           )}
           {typingText ? (
-            <p className="text-xs text-[#00FF88] truncate flex items-center justify-center gap-1.5">
+            <p className="text-[10px] text-[#00FF88] truncate flex items-center justify-center gap-1.5 mt-0.5">
               <span className="flex gap-0.5">
                 <span className="w-1 h-1 bg-[#00FF88] rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
                 <span className="w-1 h-1 bg-[#00FF88] rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
@@ -619,8 +966,9 @@ export default function ChatScreen() {
               </span>
               {typingText}
             </p>
-          ) : memberCount !== null ? (
-            <button onClick={() => setShowMembers(true)} className="mx-auto text-xs text-[#555] hover:text-[#007AFF] transition-colors flex items-center justify-center gap-2 bg-white/[0.03] px-3 py-1 rounded-full">
+          ) : null}
+          {memberCount !== null && (
+            <button onClick={() => setShowMembers(true)} className="mx-auto mt-1 text-xs text-[#555] hover:text-[#007AFF] transition-colors flex items-center justify-center gap-2 bg-white/[0.03] px-3 py-1 rounded-full">
               <span className="flex items-center gap-1.5">
                 <span className="w-1.5 h-1.5 rounded-full bg-[#00FF88] shadow-[0_0_4px_#00FF88]" />
                 <span>{onlineCount}</span>
@@ -629,7 +977,7 @@ export default function ChatScreen() {
               <span className="text-[#333]">·</span>
               <span>{memberCount} <span className="text-[#555]">member{memberCount !== 1 ? 's' : ''}</span></span>
             </button>
-          ) : null}
+          )}
         </div>
 
         <button
@@ -648,81 +996,33 @@ export default function ChatScreen() {
             <path d="M5 9a.75.75 0 0 1 .75.75 4.25 4.25 0 0 0 8.5 0A.75.75 0 0 1 15 9.75a5.75 5.75 0 0 1-5 5.698V17a.75.75 0 0 1-1.5 0v-1.552A5.75 5.75 0 0 1 4.25 9.75A.75.75 0 0 1 5 9Z" />
           </svg>
         </button>
-
-        {showMembers && (
-          <>
-            <div className="fixed inset-0 z-20 bg-black/70 backdrop-blur-sm" onClick={() => { setShowMembers(false); setMemberSearch(''); }} />
-            <div className="fixed inset-0 z-30 flex items-center justify-center p-6 pointer-events-none" onClick={() => { setShowMembers(false); setMemberSearch(''); }}>
-              <div className="bg-[#1C1C1E] border border-[#333] rounded-2xl w-full max-w-sm shadow-2xl pointer-events-auto animate-fade-in overflow-hidden" onClick={(e) => e.stopPropagation()}>
-                <div className="flex items-center justify-between px-5 py-4 border-b border-[#333]">
-                  <h2 className="text-sm font-semibold text-white">Members <span className="text-[#555] font-normal">({memberCount})</span></h2>
-                  <button onClick={() => { setShowMembers(false); setMemberSearch(''); }} className="text-[#555] hover:text-white p-1.5 rounded-lg hover:bg-white/5 transition-all">
-                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4"><path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z" /></svg>
-                  </button>
-                </div>
-                <div className="px-4 pt-3 pb-1">
-                  <div className="flex items-center gap-2 bg-[#0D0D0D] rounded-xl px-3 py-2 border border-[#333] focus-within:border-[#555] transition-colors">
-                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 text-[#555] shrink-0">
-                      <path fillRule="evenodd" d="M9 3.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11ZM2 9a7 7 0 1 1 12.452 4.391l3.328 3.329a.75.75 0 1 1-1.06 1.06l-3.329-3.328A7 7 0 0 1 2 9Z" clipRule="evenodd" />
-                    </svg>
-                    <input
-                      type="text"
-                      value={memberSearch}
-                      onChange={(e) => setMemberSearch(e.target.value)}
-                      placeholder="Search members..."
-                      className="flex-1 bg-transparent text-white text-sm placeholder-[#555] outline-none"
-                    />
-                    {memberSearch && (
-                      <button onClick={() => setMemberSearch('')} className="text-[#555] hover:text-white p-0.5 rounded">
-                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5"><path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z" /></svg>
-                      </button>
-                    )}
-                  </div>
-                </div>
-                <div className="max-h-72 overflow-y-auto p-2">
-                  {memberList.length === 0 ? (
-                    <p className="text-xs text-[#555] text-center py-8">No members</p>
-                  ) : (
-                    <div className="space-y-0.5">
-                      {[...memberList]
-                        .sort((a, b) => {
-                          if (a.online !== b.online) return a.online ? -1 : 1;
-                          return a.name.localeCompare(b.name);
-                        })
-                        .filter((m) => m.name.toLowerCase().includes(memberSearch.toLowerCase()))
-                        .map((m) => (
-                        <div key={m.uid} className="flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-white/[0.03] transition-colors">
-                          <div className="relative shrink-0">
-                            <div className="w-8 h-8 rounded-full bg-gradient-to-br from-[#007AFF]/30 to-[#5856D6]/30 text-[#007AFF] text-xs font-bold flex items-center justify-center">
-                              {m.name.charAt(0).toUpperCase()}
-                            </div>
-                            {m.online && (
-                              <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 bg-[#00FF88] rounded-full border-2 border-[#1C1C1E]" />
-                            )}
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2">
-                              <span className="text-sm text-[#ccc] font-medium truncate">{m.name}</span>
-                              {m.uid === user?.uid && (
-                                <span className="text-[10px] text-[#555] bg-white/5 px-1.5 py-0.5 rounded-md">you</span>
-                              )}
-                            </div>
-                          </div>
-                          {m.online ? (
-                            <span className="text-[10px] text-[#00FF88] bg-[#00FF88]/10 px-2 py-0.5 rounded-full font-medium shrink-0">Online</span>
-                          ) : (
-                            <span className="text-[10px] text-[#555] shrink-0">Offline</span>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </div>
-            </div>
-          </>
-        )}
+        <button
+          onClick={() => setShowShare(true)}
+          className="p-2 rounded-lg transition-all shrink-0 text-[#555] hover:text-white hover:bg-white/5"
+          title="Share room"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5">
+            <path d="M13 4.5a2.5 2.5 0 1 1 .702 1.737l-3.968 2.061a2.5 2.5 0 0 1 0 1.404l3.968 2.061a2.5 2.5 0 1 1-.702 1.737l-3.968-2.061a2.5 2.5 0 1 1-1.2-1.999V6.56a2.5 2.5 0 1 1 1.2-1.999l3.968 2.06A2.505 2.505 0 0 1 13 4.5Z" />
+          </svg>
+        </button>
+        <button
+          onClick={() => setShowSettings(true)}
+          className="p-2 rounded-lg transition-all shrink-0 text-[#555] hover:text-white hover:bg-white/5"
+          title="Room settings"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5">
+            <path fillRule="evenodd" d="M7.84 1.804A1 1 0 0 1 8.82 1h2.36a1 1 0 0 1 .98.804l.331 1.652a6.993 6.993 0 0 1 1.929 1.115l1.598-.54a1 1 0 0 1 1.186.447l1.18 2.044a1 1 0 0 1-.205 1.251l-1.267 1.113a7.047 7.047 0 0 1 0 2.228l1.267 1.113a1 1 0 0 1 .206 1.25l-1.18 2.045a1 1 0 0 1-1.187.447l-1.598-.54a6.993 6.993 0 0 1-1.929 1.115l-.33 1.652a1 1 0 0 1-.98.804H8.82a1 1 0 0 1-.98-.804l-.331-1.652a6.993 6.993 0 0 1-1.929-1.115l-1.598.54a1 1 0 0 1-1.186-.447l-1.18-2.044a1 1 0 0 1 .205-1.251l1.267-1.114a7.05 7.05 0 0 1 0-2.227L1.821 7.773a1 1 0 0 1-.206-1.25l1.18-2.045a1 1 0 0 1 1.187-.447l1.598.54A6.993 6.993 0 0 1 7.51 3.456l.33-1.652ZM10 13a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" clipRule="evenodd" />
+          </svg>
+        </button>
       </header>
+
+      {roomSettings?.frozen && (
+        <div className="px-4 py-1.5 bg-[#FF3B30]/10 border-b border-[#FF3B30]/20 text-center text-[11px] text-[#FF6B61] font-medium shrink-0">
+          {user?.uid === roomOwnerUid
+            ? 'Room is frozen — members cannot send messages'
+            : 'Room is frozen by the owner — you cannot send messages'}
+        </div>
+      )}
 
       <div ref={messagesRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-1 scroll-smooth will-change-scroll">
         {loading && (
@@ -753,23 +1053,29 @@ export default function ChatScreen() {
         )}
 
         {messages.map((msg, i) => (
-          <MessageItem
-            key={msg.id}
-            msg={msg}
-            isOwn={msg.senderUid === user?.uid}
-            menuOpen={menuMsgId === msg.id}
-            reactingOpen={reactingMsgId === msg.id}
-            userUid={user?.uid}
-            formatTime={formatTime}
-            onReply={handleReply}
-            onEdit={handleEdit}
-            onDelete={deleteMessage}
-            onToggleReaction={toggleReaction}
-            onMenuOpen={setMenuMsgId}
-            onReactingOpen={setReactingMsgId}
-            resolveName={(uid) => memberList.find((m) => m.uid === uid)?.name || uid.slice(0, 6)}
-            prevSenderSame={i > 0 && messages[i - 1].senderUid === msg.senderUid}
-          />
+          <Fragment key={msg.id}>
+            {(i === 0 || !isSameDay(messages[i - 1].timestamp, msg.timestamp)) && (
+              <DateSeparator ts={msg.timestamp} />
+            )}
+            <MessageItem
+              msg={msg}
+              isOwn={msg.senderUid === user?.uid}
+              menuOpen={menuMsgId === msg.id}
+              reactingOpen={reactingMsgId === msg.id}
+              userUid={user?.uid}
+              formatTime={formatTime}
+              formatMessageTime={formatMessageTime}
+              onReply={handleReply}
+              onEdit={handleEdit}
+              onDelete={deleteMessage}
+              onToggleReaction={toggleReaction}
+              onVote={votePoll}
+              onMenuOpen={setMenuMsgId}
+              onReactingOpen={setReactingMsgId}
+              resolveName={(uid) => memberList.find((m) => m.uid === uid)?.name || uid.slice(0, 6)}
+              prevSenderSame={i > 0 && messages[i - 1].senderUid === msg.senderUid}
+            />
+          </Fragment>
         ))}
         <div ref={bottomRef} />
       </div>
@@ -820,6 +1126,69 @@ export default function ChatScreen() {
             onClose={() => setShowEmojiPicker(false)}
           />
         )}
+        {showPollForm && (
+          <div className="mb-2 bg-[#1C1C1E] border border-[#333] rounded-2xl p-3 animate-fade-in">
+            <p className="text-xs font-semibold text-white mb-2 flex items-center gap-1.5">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 text-[#FF9F0A]">
+                <path fillRule="evenodd" d="M2 5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5Zm3.293 2.293a1 1 0 0 1 1.414 0l3 3a1 1 0 0 1 0 1.414l-3 3a1 1 0 0 1-1.414-1.414L7.586 11 5.293 8.707a1 1 0 0 1 0-1.414Zm5 1a1 1 0 0 1 1.414-1.414l2 2a1 1 0 0 1 0 1.414l-2 2a1 1 0 0 1-1.414-1.414L12.586 10l-1.293-1.293a1 1 0 0 1-.293-.707Z" clipRule="evenodd" />
+              </svg>
+              New poll
+              <button onClick={() => setShowPollForm(false)} className="ml-auto text-[#555] hover:text-white">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4"><path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z" /></svg>
+              </button>
+            </p>
+            <input
+              type="text"
+              value={pollQuestion}
+              onChange={(e) => setPollQuestion(e.target.value)}
+              placeholder="Question"
+              maxLength={100}
+              className="w-full bg-[#0D0D0D] text-white text-sm rounded-lg px-3 py-2 outline-none border border-[#333] focus:border-[#555] placeholder-[#555]"
+            />
+            <div className="mt-2 space-y-1.5">
+              {pollOptions.map((opt, i) => (
+                <div key={i} className="flex items-center gap-1.5">
+                  <input
+                    type="text"
+                    value={opt}
+                    onChange={(e) => {
+                      const next = [...pollOptions];
+                      next[i] = e.target.value;
+                      setPollOptions(next);
+                    }}
+                    placeholder={`Option ${i + 1}`}
+                    maxLength={60}
+                    className="flex-1 bg-[#0D0D0D] text-white text-sm rounded-lg px-3 py-2 outline-none border border-[#333] focus:border-[#555] placeholder-[#555]"
+                  />
+                  {pollOptions.length > 2 && (
+                    <button
+                      onClick={() => setPollOptions(pollOptions.filter((_, j) => j !== i))}
+                      className="text-[#555] hover:text-red-400 p-1"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4"><path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z" /></svg>
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+            <div className="flex items-center gap-2 mt-2">
+              {pollOptions.length < 6 && (
+                <button
+                  onClick={() => setPollOptions([...pollOptions, ''])}
+                  className="text-xs text-[#007AFF] font-medium hover:opacity-80"
+                >
+                  + Add option
+                </button>
+              )}
+              <button
+                onClick={sendPoll}
+                className="ml-auto px-3.5 py-1.5 rounded-lg bg-[#FF9F0A] text-black text-xs font-semibold hover:bg-[#FFB340] transition-colors"
+              >
+                Post poll
+              </button>
+            </div>
+          </div>
+        )}
         <div className="flex items-center gap-1.5 bg-[#1C1C1E] rounded-2xl px-3 py-2 border border-[#2A2A2A] focus-within:border-[#444] transition-colors">
           <button
             onClick={() => setShowEmojiPicker(!showEmojiPicker)}
@@ -838,6 +1207,15 @@ export default function ChatScreen() {
           >
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
               <path fillRule="evenodd" d="M1.5 6a2.25 2.25 0 0 1 2.25-2.25h16.5A2.25 2.25 0 0 1 22.5 6v12a2.25 2.25 0 0 1-2.25 2.25H3.75A2.25 2.25 0 0 1 1.5 18V6ZM3 16.06V18c0 .414.336.75.75.75h16.5A.75.75 0 0 0 21 18v-1.94l-2.69-2.689a1.5 1.5 0 0 0-2.12 0l-.88.879.97.97a.75.75 0 1 1-1.06 1.06l-5.16-5.159a1.5 1.5 0 0 0-2.12 0L3 16.061Zm10.125-7.81a1.125 1.125 0 1 1 2.25 0 1.125 1.125 0 0 1-2.25 0Z" clipRule="evenodd" />
+            </svg>
+          </button>
+          <button
+            onClick={() => setShowPollForm(!showPollForm)}
+            className={`shrink-0 transition-colors p-1 rounded-lg hover:bg-white/5 ${showPollForm ? 'text-[#FF9F0A]' : 'text-[#555] hover:text-white'}`}
+            title="Create poll"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5">
+              <path fillRule="evenodd" d="M2 5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5Zm3.293 2.293a1 1 0 0 1 1.414 0l3 3a1 1 0 0 1 0 1.414l-3 3a1 1 0 0 1-1.414-1.414L7.586 11 5.293 8.707a1 1 0 0 1 0-1.414Zm5 1a1 1 0 0 1 1.414-1.414l2 2a1 1 0 0 1 0 1.414l-2 2a1 1 0 0 1-1.414-1.414L12.586 10l-1.293-1.293a1 1 0 0 1-.293-.707Z" clipRule="evenodd" />
             </svg>
           </button>
           <input
@@ -887,8 +1265,17 @@ export default function ChatScreen() {
             maxLength={2000}
           />
           <button
+            onClick={() => setBurnEnabled(!burnEnabled)}
+            className={`shrink-0 transition-colors p-1 rounded-lg hover:bg-white/5 ${burnEnabled ? 'text-[#FF453A] bg-[#FF453A]/10' : 'text-[#555] hover:text-white'}`}
+            title="Burn-on-read: message deletes itself after 30s"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5">
+              <path fillRule="evenodd" d="M13.5 4.938a7 7 0 1 1-9.006 1.737c.202-.268.59-.295.793-.038.586.737 1.316 1.33 2.114 1.623C9.594 9.215 10.95 10 12.75 10a.75.75 0 0 0 0-1.5c-1.531 0-2.648-.548-3.563-1.37-.674-.603-.99-1.313-1.252-2.043C8.32 4.13 9.208 3.55 9.987 3.5c.257-.021.504.044.727.186.796.505 1.496 1.12 2.1 1.882a.75.75 0 0 0 1.086.63c.047-.025.092-.053.136-.082a.24.24 0 0 1 .117-.033c.257.002.51.025.77.06l.2.03c.07.01.135.028.198.045a.75.75 0 0 0 .18-1.488l-.2-.03A7.16 7.16 0 0 0 15 4.16a.75.75 0 0 0-1.5.778ZM13.4 8.5a.75.75 0 0 1 .37 1.4l-4.5 2.6a.75.75 0 1 1-.75-1.3l4.5-2.6a.75.75 0 0 1 .38-.1Z" clipRule="evenodd" />
+            </svg>
+          </button>
+          <button
             onClick={sendMessage}
-            disabled={!input.trim() || sending || !cryptoKey}
+            disabled={!input.trim() || sending || !cryptoKey || (roomSettings?.frozen === true && user?.uid !== roomOwnerUid)}
             className="text-[#007AFF] disabled:opacity-20 transition-all p-1 rounded-lg hover:bg-[#007AFF]/10 disabled:cursor-not-allowed"
           >
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-5 h-5">
@@ -911,7 +1298,663 @@ export default function ChatScreen() {
         invitations={callInvitations}
         onDismissInvitation={voiceCall.dismissInvitation}
       />
+
+      {showMembers && (
+        <MembersModal
+          memberCount={memberCount}
+          memberList={memberList}
+          fingerprint={fingerprint}
+          search={memberSearch}
+          onSearchChange={setMemberSearch}
+          currentUid={user?.uid}
+          isAdmin={!!user && user.uid === roomOwnerUid}
+          roomOwnerUid={roomOwnerUid}
+          onRemoveMember={removeMember}
+          onClose={() => { setShowMembers(false); setMemberSearch(''); }}
+        />
+      )}
+
+      {showShare && (
+        <ShareModal
+          roomCode={code || ''}
+          roomName={roomName}
+          showToast={showToast}
+          onClose={() => setShowShare(false)}
+        />
+      )}
+
+      {showSettings && (
+        <SettingsModal
+          roomCode={code || ''}
+          roomName={roomName}
+          isAdmin={!!user && user.uid === roomOwnerUid}
+          settings={roomSettings}
+          tone={tone}
+          inviteLink={inviteLink}
+          onToneChange={setToneAndSave}
+          onSaveSettings={saveSettings}
+          onRotateKey={rotateKey}
+          onCreateInvite={createInvite}
+          onClose={() => setShowSettings(false)}
+        />
+      )}
+
+      {toast && (
+        <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-[60] bg-[#1C1C1E] border border-[#333] text-white text-xs font-medium px-4 py-2.5 rounded-xl shadow-2xl animate-fade-in whitespace-nowrap">
+          {toast}
+        </div>
+      )}
+
+      {kicked && (
+        <div className="fixed inset-0 z-50 bg-black/90 flex flex-col items-center justify-center gap-4 p-6 text-center">
+          <div className="w-14 h-14 rounded-full bg-red-500/10 flex items-center justify-center">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-7 h-7 text-red-400">
+              <path fillRule="evenodd" d="M10 18a8 8 0 1 0 0-16 8 8 0 0 0 0 16ZM8.28 7.22a.75.75 0 0 0-1.06 1.06L8.94 10l-1.72 1.72a.75.75 0 1 0 1.06 1.06L10 11.06l1.72 1.72a.75.75 0 1 0 1.06-1.06L11.06 10l1.72-1.72a.75.75 0 0 0-1.06-1.06L10 8.94 8.28 7.22Z" clipRule="evenodd" />
+            </svg>
+          </div>
+          <div>
+            <h2 className="text-lg font-bold text-white">You were removed from this room</h2>
+            <p className="text-xs text-[#555] mt-1.5">The room owner removed you from the member list.</p>
+          </div>
+          <button
+            onClick={() => navigate('/')}
+            className="px-5 py-2.5 rounded-xl bg-[#007AFF] text-white text-sm font-medium hover:bg-[#0066CC] transition-all"
+          >
+            Go to Dashboard
+          </button>
+        </div>
+      )}
     </div>
+  );
+}
+
+function MembersModal({
+  memberCount,
+  memberList,
+  fingerprint,
+  search,
+  onSearchChange,
+  currentUid,
+  isAdmin,
+  roomOwnerUid,
+  onRemoveMember,
+  onClose,
+}: {
+  memberCount: number | null;
+  memberList: { name: string; uid: string; online?: boolean; lastSeen?: number; lastSpokeAt?: number | null }[];
+  fingerprint: string;
+  search: string;
+  onSearchChange: (v: string) => void;
+  currentUid?: string;
+  isAdmin: boolean;
+  roomOwnerUid: string | null;
+  onRemoveMember: (uid: string) => void;
+  onClose: () => void;
+}) {
+  const [confirmRemoveUid, setConfirmRemoveUid] = useState<string | null>(null);
+  const confirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [deviceMap, setDeviceMap] = useState<Record<string, { total: number; online: number }>>({});
+  const [myDevices, setMyDevices] = useState<{ id: string; name: string; online: boolean; lastSeen: number }[]>([]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  useEffect(() => () => {
+    if (confirmTimerRef.current) clearTimeout(confirmTimerRef.current);
+  }, []);
+
+  // Fetch device info for all members + own device list
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const map: Record<string, { total: number; online: number }> = {};
+      for (const m of memberList) {
+        try {
+          const snap = await getDocs(collection(db, 'users', m.uid, 'devices'));
+          let total = 0, online = 0;
+          snap.forEach((d) => {
+            const data = d.data();
+            if (data.revoked === true) return;
+            total++;
+            const lastSeen = data.lastSeen?.toMillis?.() ?? 0;
+            if (data.online === true && Date.now() - lastSeen < 180000) online++;
+          });
+          map[m.uid] = { total, online };
+          if (m.uid === currentUid) {
+            const list = snap.docs
+              .filter((d) => !d.data()?.revoked)
+              .map((d) => ({
+                id: d.id,
+                name: d.data()?.name || 'Unknown device',
+                online: d.data()?.online === true && Date.now() - (d.data()?.lastSeen?.toMillis?.() ?? 0) < 180000,
+                lastSeen: d.data()?.lastSeen?.toMillis?.() ?? 0,
+              }));
+            setMyDevices(list);
+          }
+        } catch {}
+      }
+      if (!cancelled) setDeviceMap(map);
+    })();
+    return () => { cancelled = true; };
+  }, [memberList, currentUid]);
+
+  const revokeDevice = async (deviceId: string) => {
+    if (!currentUid) return;
+    try {
+      await updateDoc(doc(db, 'users', currentUid, 'devices', deviceId), { revoked: true });
+      setMyDevices((prev) => prev.filter((d) => d.id !== deviceId));
+    } catch {}
+  };
+
+  const copyFingerprint = async () => {
+    try {
+      await navigator.clipboard.writeText(fingerprint);
+    } catch {}
+  };
+
+  const handleRemove = (uid: string) => {
+    if (confirmRemoveUid === uid) {
+      if (confirmTimerRef.current) clearTimeout(confirmTimerRef.current);
+      setConfirmRemoveUid(null);
+      onRemoveMember(uid);
+    } else {
+      setConfirmRemoveUid(uid);
+      if (confirmTimerRef.current) clearTimeout(confirmTimerRef.current);
+      confirmTimerRef.current = setTimeout(() => setConfirmRemoveUid(null), 2500);
+    }
+  };
+
+  const filtered = memberList
+    .filter((m) => m.name.toLowerCase().includes(search.toLowerCase()))
+    .sort((a, b) => {
+      if (a.online !== b.online) return a.online ? -1 : 1;
+      const aSeen = a.lastSeen || 0;
+      const bSeen = b.lastSeen || 0;
+      if (aSeen !== bSeen) return bSeen - aSeen;
+      return a.name.localeCompare(b.name);
+    });
+
+  const activityColor = (lastSeen?: number) => {
+    if (!lastSeen) return '#333';
+    const age = Date.now() - lastSeen;
+    if (age < 5 * 60000) return '#00FF88';
+    if (age < 60 * 60000) return '#FFD60A';
+    if (age < 6 * 3600000) return '#FF9F0A';
+    return '#3A3A3C';
+  };
+
+  const activityText = (m: { online?: boolean; lastSeen?: number; lastSpokeAt?: number | null }) => {
+    if (m.online) return 'Online';
+    if (!m.lastSeen) return 'Never active';
+    const age = Date.now() - m.lastSeen;
+    const mins = Math.floor(age / 60000);
+    if (mins < 1) return 'Active just now';
+    if (mins < 60) return `Active ${mins}m ago`;
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 24) return `Active ${hrs}h ago`;
+    const days = Math.floor(hrs / 24);
+    return `Active ${days}d ago`;
+  };
+
+  return (
+    <>
+      <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm" onClick={onClose} />
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 pointer-events-none">
+        <div
+          className="bg-[#1C1C1E] border border-[#333] rounded-2xl w-full max-w-md shadow-2xl pointer-events-auto animate-fade-in overflow-hidden my-auto"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="flex items-center justify-between px-5 py-4 border-b border-[#333]">
+            <h2 className="text-sm font-semibold text-white">
+              Members <span className="text-[#555] font-normal">({memberCount})</span>
+              <span className="text-[10px] text-[#00FF88] font-normal ml-2">● {filtered.filter((m) => m.online).length} online</span>
+            </h2>
+            <button onClick={onClose} className="text-[#555] hover:text-white p-1.5 rounded-lg hover:bg-white/5 transition-all">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4"><path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z" /></svg>
+            </button>
+          </div>
+          {fingerprint && (
+            <button
+              onClick={copyFingerprint}
+              className="flex items-center justify-center gap-1.5 w-full px-5 py-2 border-b border-[#222] text-[11px] text-[#00FF88]/80 hover:text-[#00FF88] transition-colors"
+              title="Copy room fingerprint"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5">
+                <path fillRule="evenodd" d="M10 1a4.5 4.5 0 0 0-4.5 4.5V9H5a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-6a2 2 0 0 0-2-2h-.5V5.5A4.5 4.5 0 0 0 10 1Zm3 8V5.5a3 3 0 1 0-6 0V9h6Z" clipRule="evenodd" />
+              </svg>
+              Room fingerprint: <span className="font-mono font-semibold tracking-wider">{fingerprint}</span>
+            </button>
+          )}
+          <div className="px-4 pt-3 pb-1">
+            <div className="flex items-center gap-2 bg-[#0D0D0D] rounded-xl px-3 py-2 border border-[#333] focus-within:border-[#555] transition-colors">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 text-[#555] shrink-0">
+                <path fillRule="evenodd" d="M9 3.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11ZM2 9a7 7 0 1 1 12.452 4.391l3.328 3.329a.75.75 0 1 1-1.06 1.06l-3.329-3.328A7 7 0 0 1 2 9Z" clipRule="evenodd" />
+              </svg>
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => onSearchChange(e.target.value)}
+                placeholder="Search members..."
+                className="flex-1 bg-transparent text-white text-sm placeholder-[#555] outline-none"
+                autoFocus
+              />
+              {search && (
+                <button onClick={() => onSearchChange('')} className="text-[#555] hover:text-white p-0.5 rounded">
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5"><path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z" /></svg>
+                </button>
+              )}
+            </div>
+          </div>
+          <div className="max-h-80 overflow-y-auto p-2">
+            {filtered.length === 0 ? (
+              <p className="text-xs text-[#555] text-center py-8">
+                {memberList.length === 0 ? 'No members' : 'No members found'}
+              </p>
+            ) : (
+              <div className="space-y-0.5">
+                {filtered.map((m) => (
+                  <div key={m.uid} className="flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-white/[0.03] transition-colors">
+                    <div className="relative shrink-0">
+                      <div
+                        className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold border-2 text-white"
+                        style={{
+                          background: 'linear-gradient(135deg, rgba(0,122,255,0.35), rgba(88,86,214,0.35))',
+                          borderColor: m.online ? '#00FF88' : activityColor(m.lastSeen),
+                        }}
+                      >
+                        {m.name.charAt(0).toUpperCase()}
+                      </div>
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm text-[#ccc] font-medium truncate">{m.name}</span>
+                        {m.uid === roomOwnerUid && (
+                          <span className="text-[10px] text-[#FFD700] bg-yellow-400/10 px-1.5 py-0.5 rounded-md font-medium">owner</span>
+                        )}
+                        {m.uid === currentUid && (
+                          <span className="text-[10px] text-[#555] bg-white/5 px-1.5 py-0.5 rounded-md">you</span>
+                        )}
+                        {m.lastSpokeAt === null && (
+                          <span className="text-[10px] text-[#FF9F0A]/80 bg-[#FF9F0A]/10 px-1.5 py-0.5 rounded-md font-medium">observer</span>
+                        )}
+                      </div>
+                      <p className="text-[11px] text-[#666] mt-0.5">
+                        {activityText(m)}
+                        {deviceMap[m.uid]?.total ? ` · ${deviceMap[m.uid].total} device${deviceMap[m.uid].total !== 1 ? 's' : ''}${deviceMap[m.uid].online ? ` (${deviceMap[m.uid].online} online)` : ''}` : ''}
+                      </p>
+                    </div>
+                    {isAdmin && m.uid !== currentUid && (
+                      <button
+                        onClick={() => handleRemove(m.uid)}
+                        className={`text-[10px] font-medium px-2.5 py-1 rounded-full transition-all shrink-0 ${
+                          confirmRemoveUid === m.uid
+                            ? 'bg-red-500 text-white hover:bg-red-600'
+                            : 'text-red-400/80 bg-red-400/10 hover:bg-red-400/20 hover:text-red-300'
+                        }`}
+                        title="Remove from room"
+                      >
+                        {confirmRemoveUid === m.uid ? 'Confirm?' : 'Remove'}
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          {myDevices.length > 0 && (
+            <div className="border-t border-[#333] px-4 py-3">
+              <p className="text-[11px] text-[#555] font-medium uppercase tracking-wider mb-2">My devices</p>
+              <div className="space-y-1.5">
+                {myDevices.map((d) => (
+                  <div key={d.id} className="flex items-center gap-2 text-xs">
+                    <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${d.online ? 'bg-[#00FF88]' : 'bg-[#3A3A3C]'}`} />
+                    <span className="flex-1 text-[#ccc] truncate">{d.name}</span>
+                    <span className="text-[10px] text-[#555] shrink-0">{d.online ? 'Online' : 'Offline'}</span>
+                    <button
+                      onClick={() => revokeDevice(d.id)}
+                      className="text-[10px] text-red-400/80 hover:text-red-300 px-1.5 py-0.5 rounded bg-red-400/10 shrink-0"
+                    >
+                      Revoke
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </>
+  );
+}
+
+function ShareModal({
+  roomCode,
+  roomName,
+  showToast,
+  onClose,
+}: {
+  roomCode: string;
+  roomName: string;
+  showToast: (msg: string) => void;
+  onClose: () => void;
+}) {
+  const shareLink = `${window.location.origin}/?code=${roomCode}`;
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  const copyLink = async () => {
+    try {
+      await navigator.clipboard.writeText(shareLink);
+      showToast('Join link copied');
+    } catch {
+      showToast('Could not copy link');
+    }
+  };
+
+  const nativeShare = async () => {
+    try {
+      await navigator.share({
+        title: `Chatrix #${roomCode}`,
+        text: `Join my Chatrix room!\nRoom code: ${roomCode}`,
+        url: shareLink,
+      });
+    } catch {}
+  };
+
+  return (
+    <>
+      <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm" onClick={onClose} />
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 pointer-events-none">
+        <div
+          className="bg-[#1C1C1E] border border-[#333] rounded-2xl w-full max-w-md shadow-2xl pointer-events-auto animate-fade-in overflow-hidden my-auto"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="flex items-center justify-between px-5 py-4 border-b border-[#333]">
+            <h2 className="text-sm font-semibold text-white">
+              Share room <span className="text-[#555] font-normal">· {roomName}</span>
+            </h2>
+            <button onClick={onClose} className="text-[#555] hover:text-white p-1.5 rounded-lg hover:bg-white/5 transition-all">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4"><path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z" /></svg>
+            </button>
+          </div>
+
+          <div className="px-5 py-4 space-y-4">
+            <div className="flex items-center justify-center gap-2 bg-[#0D0D0D] rounded-xl px-4 py-2.5 border border-[#333]">
+              <span className="text-[11px] text-[#555] font-medium uppercase tracking-wider">Room code</span>
+              <span className="text-sm font-mono font-bold text-[#00FF88] tracking-[0.2em]">{roomCode}</span>
+            </div>
+
+            <div className="rounded-xl border border-[#333] p-4">
+              <p className="text-[11px] text-[#555] font-medium uppercase tracking-wider mb-2 flex items-center gap-1.5">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5">
+                  <path fillRule="evenodd" d="M2.5 8.5A2.5 2.5 0 0 1 5 6h10a2.5 2.5 0 0 1 2.5 2.5v6A2.5 2.5 0 0 1 15 17H5a2.5 2.5 0 0 1-2.5-2.5v-6Zm14.5-2.622V4.75A2.75 2.75 0 0 0 14.25 2h-8.5A2.75 2.75 0 0 0 3 4.75v1.128c.32.08.65.122 1 .122h12c.35 0 .68-.043 1-.122Z" clipRule="evenodd" />
+                </svg>
+                Join link
+              </p>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  readOnly
+                  value={shareLink}
+                  onFocus={(e) => e.target.select()}
+                  className="flex-1 bg-[#0D0D0D] text-[#ccc] text-xs rounded-lg px-3 py-2.5 outline-none border border-[#333] focus:border-[#555] truncate"
+                />
+                <button
+                  onClick={copyLink}
+                  className="px-3.5 py-2.5 rounded-lg text-xs font-medium bg-[#007AFF] text-white hover:bg-[#0066CC] transition-all shrink-0"
+                >
+                  Copy
+                </button>
+              </div>
+              {typeof navigator !== 'undefined' && !!navigator.share && (
+                <button
+                  onClick={nativeShare}
+                  className="mt-2.5 w-full py-2 rounded-lg text-xs font-medium text-[#ccc] border border-[#333] hover:border-[#555] hover:text-white transition-all"
+                >
+                  Share via system
+                </button>
+              )}
+              <p className="text-[10px] text-[#555] mt-2">Anyone with this link can join the room using their own name.</p>
+            </div>
+
+            <div className="rounded-xl border border-[#333] p-4 flex flex-col items-center">
+              <p className="text-[11px] text-[#555] font-medium uppercase tracking-wider mb-3 flex items-center gap-1.5">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5">
+                  <path fillRule="evenodd" d="M3 4a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V4Zm3 2a1 1 0 1 0 0 2 1 1 0 0 0 0-2Zm0 6a1 1 0 1 0 0 2 1 1 0 0 0 0-2Zm4-6a1 1 0 1 0 0 2 1 1 0 0 0 0-2Zm4 0a1 1 0 1 0 0 2 1 1 0 0 0 0-2Zm-8 6a1 1 0 1 0 0 2 1 1 0 0 0 0-2Zm8 0a1 1 0 1 0 0 2 1 1 0 0 0 0-2Zm-4 0a1 1 0 1 0 0 2 1 1 0 0 0 0-2Zm0 4a1 1 0 1 0 0 2 1 1 0 0 0 0-2Zm4 0a1 1 0 1 0 0 2 1 1 0 0 0 0-2Z" clipRule="evenodd" />
+                </svg>
+                QR code
+              </p>
+              <div className="bg-white p-3.5 rounded-xl shadow-lg">
+                <QRCodeSVG value={shareLink} size={168} level="M" fgColor="#000000" bgColor="#ffffff" />
+              </div>
+              <p className="text-[10px] text-[#555] mt-2.5">Scan with a phone camera to open the room instantly.</p>
+            </div>
+          </div>
+
+          <div className="px-5 pb-5">
+            <button
+              onClick={onClose}
+              className="w-full py-2.5 rounded-xl text-sm font-medium text-[#555] border border-[#333] hover:text-white hover:border-[#555] transition-all"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
+function SettingsModal({
+  roomCode,
+  roomName,
+  isAdmin,
+  settings,
+  tone,
+  inviteLink,
+  onToneChange,
+  onSaveSettings,
+  onRotateKey,
+  onCreateInvite,
+  onClose,
+}: {
+  roomCode: string;
+  roomName: string;
+  isAdmin: boolean;
+  settings: RoomSettings | null;
+  tone: 'pop' | 'ding' | 'soft' | 'none';
+  inviteLink: string;
+  onToneChange: (t: 'pop' | 'ding' | 'soft' | 'none') => void;
+  onSaveSettings: (patch: Partial<RoomSettings>) => void;
+  onRotateKey: () => void;
+  onCreateInvite: () => void;
+  onClose: () => void;
+}) {
+  const [slowMode, setSlowMode] = useState(settings?.slowModeSec || 0);
+  const [wordsInput, setWordsInput] = useState((settings?.blockedWords || []).join(', '));
+
+  useEffect(() => {
+    setSlowMode(settings?.slowModeSec || 0);
+    setWordsInput((settings?.blockedWords || []).join(', '));
+  }, [settings]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  const save = () => {
+    const words = wordsInput.split(',').map((w) => w.trim().toLowerCase()).filter(Boolean);
+    onSaveSettings({ slowModeSec: slowMode, blockedWords: words });
+  };
+
+  const TONES: { id: 'pop' | 'ding' | 'soft' | 'none'; label: string }[] = [
+    { id: 'pop', label: 'Pop' },
+    { id: 'ding', label: 'Ding' },
+    { id: 'soft', label: 'Soft' },
+    { id: 'none', label: 'Silent' },
+  ];
+
+  return (
+    <>
+      <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm" onClick={onClose} />
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 pointer-events-none">
+        <div
+          className="bg-[#1C1C1E] border border-[#333] rounded-2xl w-full max-w-md shadow-2xl pointer-events-auto animate-fade-in overflow-hidden my-auto"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="flex items-center justify-between px-5 py-4 border-b border-[#333]">
+            <h2 className="text-sm font-semibold text-white">
+              Room settings <span className="text-[#555] font-normal">· {roomName}</span>
+            </h2>
+            <button onClick={onClose} className="text-[#555] hover:text-white p-1.5 rounded-lg hover:bg-white/5 transition-all">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4"><path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z" /></svg>
+            </button>
+          </div>
+
+          <div className="px-5 py-4 space-y-5 max-h-[65vh] overflow-y-auto">
+            <div>
+              <p className="text-[11px] text-[#555] font-medium uppercase tracking-wider mb-2">Message sound</p>
+              <div className="flex gap-1.5">
+                {TONES.map((t) => (
+                  <button
+                    key={t.id}
+                    onClick={() => onToneChange(t.id)}
+                    className={`flex-1 py-2 rounded-lg text-xs font-medium border transition-all ${
+                      tone === t.id
+                        ? t.id === 'none'
+                          ? 'border-[#3A3A3C] bg-[#3A3A3C]/30 text-white'
+                          : 'border-[#007AFF] bg-[#007AFF]/10 text-[#007AFF]'
+                        : 'border-[#333] text-[#777] hover:border-[#555]'
+                    }`}
+                  >
+                    {t.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {isAdmin && settings && (
+              <>
+                <div>
+                  <p className="text-[11px] text-[#555] font-medium uppercase tracking-wider mb-2">Slow mode</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {[0, 5, 10, 30, 60].map((sec) => (
+                      <button
+                        key={sec}
+                        onClick={() => setSlowMode(sec)}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-all ${
+                          slowMode === sec
+                            ? 'border-[#007AFF] bg-[#007AFF]/10 text-[#007AFF]'
+                            : 'border-[#333] text-[#777] hover:border-[#555]'
+                        }`}
+                      >
+                        {sec === 0 ? 'Off' : sec === 60 ? '1 min' : `${sec}s`}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <p className="text-[11px] text-[#555] font-medium uppercase tracking-wider mb-2">Blocked words</p>
+                  <input
+                    type="text"
+                    value={wordsInput}
+                    onChange={(e) => setWordsInput(e.target.value)}
+                    placeholder="e.g. spam, scam, hello"
+                    className="w-full bg-[#0D0D0D] text-white text-sm rounded-lg px-3 py-2 outline-none border border-[#333] focus:border-[#555] placeholder-[#555]"
+                  />
+                  <p className="text-[10px] text-[#555] mt-1">Comma-separated. Messages containing these are blocked.</p>
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium text-white">Freeze room</p>
+                    <p className="text-[11px] text-[#555] mt-0.5">Stop all members from sending messages</p>
+                  </div>
+                  <button
+                    onClick={() => onSaveSettings({ frozen: !settings.frozen })}
+                    className={`w-11 h-6 rounded-full transition-colors relative ${settings.frozen ? 'bg-[#FF3B30]' : 'bg-[#3A3A3C]'}`}
+                  >
+                    <div className={`absolute top-0.5 w-5 h-5 bg-white rounded-full transition-all ${settings.frozen ? 'left-[22px]' : 'left-0.5'}`} />
+                  </button>
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium text-white">Encryption key</p>
+                    <p className="text-[11px] text-[#555] mt-0.5">Current version: {settings.keyVersion ?? 0}</p>
+                  </div>
+                  <button
+                    onClick={onRotateKey}
+                    className="px-3 py-1.5 rounded-lg text-xs font-medium border border-[#FF9F0A]/40 text-[#FF9F0A] bg-[#FF9F0A]/10 hover:bg-[#FF9F0A]/20 transition-all"
+                  >
+                    Rotate key
+                  </button>
+                </div>
+
+                <div>
+                  <p className="text-[11px] text-[#555] font-medium uppercase tracking-wider mb-2">Invite someone</p>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      readOnly
+                      value={inviteLink || 'One-time invite link'}
+                      onFocus={(e) => e.target.select()}
+                      className="flex-1 bg-[#0D0D0D] text-[#ccc] text-xs rounded-lg px-3 py-2 outline-none border border-[#333] focus:border-[#555] truncate"
+                    />
+                    <button
+                      onClick={onCreateInvite}
+                      className="px-3 py-2 rounded-lg text-xs font-medium bg-[#007AFF] text-white hover:bg-[#0066CC] transition-all shrink-0"
+                    >
+                      {inviteLink ? 'New link' : 'Create'}
+                    </button>
+                  </div>
+                  <p className="text-[10px] text-[#555] mt-1">Link expires in 24 hours, works once.</p>
+                </div>
+              </>
+            )}
+
+            {!isAdmin && (
+              <p className="text-xs text-[#555] text-center py-2">
+                Only the room owner can change room-level settings.
+              </p>
+            )}
+          </div>
+
+          <div className="flex gap-3 px-5 pb-5">
+            <button
+              onClick={onClose}
+              className="flex-1 py-2.5 rounded-xl text-sm font-medium text-[#555] border border-[#333] hover:text-white hover:border-[#555] transition-all"
+            >
+              Close
+            </button>
+            {isAdmin && (
+              <button
+                onClick={save}
+                className="flex-1 py-2.5 rounded-xl text-sm font-medium bg-[#007AFF] text-white hover:bg-[#0066CC] transition-all"
+              >
+                Save
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    </>
   );
 }
 
@@ -942,7 +1985,41 @@ function MentionText({ text }: { text: string }) {
   );
 }
 
-async function decryptMessage(data: any, id: string, key: CryptoKey): Promise<DecryptedMessage> {
+async function decryptMessage(data: any, id: string, keys: Record<number, CryptoKey>): Promise<DecryptedMessage> {
+  if (data.sys) {
+    return {
+      id,
+      senderUid: 'system',
+      senderName: 'system',
+      text: '',
+      type: 'sys',
+      sys: data.sys,
+      seq: data.seq ?? undefined,
+      timestamp: data.timestamp?.toMillis() ?? Date.now(),
+    };
+  }
+  if (data.poll) {
+    return {
+      id,
+      senderUid: data.senderUid,
+      senderName: data.senderName,
+      text: '',
+      type: 'poll',
+      poll: data.poll,
+      seq: data.seq ?? undefined,
+      timestamp: data.timestamp?.toMillis() ?? Date.now(),
+    };
+  }
+  const key = keys[data.kv ?? 0];
+  if (!key) {
+    return {
+      id,
+      senderUid: data.senderUid,
+      senderName: data.senderName,
+      text: '[Encrypted]',
+      timestamp: data.timestamp?.toMillis() ?? Date.now(),
+    };
+  }
   try {
     const decrypted = await decrypt(data.ciphertext, data.iv, key);
     const parsed = JSON.parse(decrypted);
@@ -957,6 +2034,8 @@ async function decryptMessage(data: any, id: string, key: CryptoKey): Promise<De
       edited: data.edited || false,
       deleted: data.deleted || false,
       reactions: data.reactions || undefined,
+      readers: data.readers?.length || 0,
+      burn: data.burn || false,
       seq: data.seq ?? undefined,
       timestamp: data.timestamp?.toMillis() ?? Date.now(),
     };
@@ -969,6 +2048,116 @@ async function decryptMessage(data: any, id: string, key: CryptoKey): Promise<De
       timestamp: data.timestamp?.toMillis() ?? Date.now(),
     };
   }
+}
+
+async function postSystemMessage(code: string, type: 'join' | 'remove', uid: string, name: string) {
+  try {
+    const existing = await getDocs(
+      query(
+        collection(db, 'rooms', code, 'messages'),
+        where('sys.uid', '==', uid),
+        limit(1)
+      )
+    );
+    const dup = existing.docs.some((d) => d.data()?.sys?.type === type);
+    if (dup) return;
+    await addDoc(collection(db, 'rooms', code, 'messages'), {
+      sys: { type, uid, name },
+      seq: Date.now(),
+      timestamp: serverTimestamp(),
+    });
+  } catch {}
+}
+
+function playTone(tone: 'pop' | 'ding' | 'soft' | 'none') {
+  if (tone === 'none') return;
+  try {
+    const Ctx = window.AudioContext || (window as any).webkitAudioContext;
+    const ctx = new Ctx();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    const t = ctx.currentTime;
+    if (tone === 'pop') {
+      osc.type = 'square';
+      osc.frequency.setValueAtTime(880, t);
+      gain.gain.setValueAtTime(0.06, t);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.09);
+      osc.start(t);
+      osc.stop(t + 0.1);
+    } else if (tone === 'ding') {
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(1174.66, t);
+      gain.gain.setValueAtTime(0.07, t);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.5);
+      osc.start(t);
+      osc.stop(t + 0.52);
+    } else {
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(659.25, t);
+      gain.gain.setValueAtTime(0.05, t);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.25);
+      osc.start(t);
+      osc.stop(t + 0.27);
+    }
+    setTimeout(() => ctx.close().catch(() => {}), 700);
+  } catch {}
+}
+
+function playIncomingFeedback(tone: 'pop' | 'ding' | 'soft' | 'none') {
+  playTone(tone);
+  try {
+    navigator.vibrate?.(tone === 'soft' ? 15 : 30);
+  } catch {}
+}
+
+// ─── Date helpers ──────────────────────────────────────────────
+
+function dayKey(d: Date): string {
+  return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+}
+
+function isSameDay(a: number, b: number): boolean {
+  return dayKey(new Date(a)) === dayKey(new Date(b));
+}
+
+function formatDayLabel(ts: number): string {
+  const d = new Date(ts);
+  const now = new Date();
+  if (dayKey(d) === dayKey(now)) return 'Today';
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  if (dayKey(d) === dayKey(yesterday)) return 'Yesterday';
+  const weekAgo = new Date(now);
+  weekAgo.setDate(now.getDate() - 7);
+  if (d > weekAgo) return d.toLocaleDateString(undefined, { weekday: 'long' });
+  return d.toLocaleDateString(undefined, {
+    month: 'long',
+    day: 'numeric',
+    ...(d.getFullYear() === now.getFullYear() ? {} : { year: 'numeric' }),
+  });
+}
+
+function formatFullDate(ts: number): string {
+  return new Date(ts).toLocaleString(undefined, {
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+function DateSeparator({ ts }: { ts: number }) {
+  return (
+    <div className="flex items-center justify-center my-3 select-none">
+      <span className="text-[10px] font-medium text-[#555] bg-[#161618] border border-[#2A2A2A] px-3 py-1 rounded-full">
+        {formatDayLabel(ts)}
+      </span>
+    </div>
+  );
 }
 
 function MentionDropdown({
@@ -1025,10 +2214,12 @@ const MessageItem = memo(function MessageItem({
   reactingOpen,
   userUid,
   formatTime,
+  formatMessageTime,
   onReply,
   onEdit,
   onDelete,
   onToggleReaction,
+  onVote,
   onMenuOpen,
   onReactingOpen,
   resolveName,
@@ -1040,10 +2231,12 @@ const MessageItem = memo(function MessageItem({
   reactingOpen: boolean;
   userUid?: string;
   formatTime: (ts: number) => string;
+  formatMessageTime: (ts: number) => string;
   onReply: (msg: DecryptedMessage) => void;
   onEdit: (msg: DecryptedMessage) => void;
   onDelete: (msgId: string) => void;
   onToggleReaction: (msgId: string, emoji: string) => void;
+  onVote: (msgId: string, optionIndex: number) => void;
   onMenuOpen: (id: string | null) => void;
   onReactingOpen: (id: string | null) => void;
   resolveName: (uid: string) => string;
@@ -1052,6 +2245,25 @@ const MessageItem = memo(function MessageItem({
   const [hoveredReaction, setHoveredReaction] = useState<string | null>(null);
   const isImage = msg.type === 'image';
   const isFile = msg.type === 'file';
+  const isSys = msg.type === 'sys';
+  const isPoll = msg.type === 'poll';
+
+  if (isSys) {
+    const joined = msg.sys?.type === 'join';
+    return (
+      <div className="flex justify-center my-2.5">
+        <div className={`flex items-center gap-1.5 text-[11px] px-3.5 py-1.5 rounded-full border ${joined ? 'text-[#00FF88]/80 border-[#00FF88]/15 bg-[#00FF88]/5' : 'text-[#FF9F0A]/80 border-[#FF9F0A]/15 bg-[#FF9F0A]/5'}`}>
+          {joined ? '➕' : '🚫'}
+          <span>
+            <span className="font-medium">{msg.sys?.name}</span>
+            {' '}{joined ? 'joined the room' : 'was removed'}
+          </span>
+          <span className="text-[#444]" title={formatFullDate(msg.timestamp)}>{formatTime(msg.timestamp)}</span>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className={`flex flex-col ${isOwn ? 'items-end' : 'items-start'} ${prevSenderSame ? 'mt-0.5' : 'mt-2'}`}>
       {msg.deleted ? (
@@ -1061,12 +2273,13 @@ const MessageItem = memo(function MessageItem({
       ) : (
         <div className={`flex flex-col relative max-w-[80%] ${isOwn ? 'items-end' : 'items-start'}`}>
           {/* Sender info — only when sender changes */}
-          {!prevSenderSame && (
+          {!prevSenderSame && !isPoll && (
           <div className={`flex items-center gap-1.5 mb-0.5 ${isOwn ? 'flex-row-reverse' : 'flex-row'}`}>
             {!isOwn && <Avatar name={msg.senderName} size="sm" />}
             <span className="text-[11px] text-[#555] font-medium">{msg.senderName}</span>
-            <span className="text-[9px] text-[#333]">{formatTime(msg.timestamp)}</span>
+            <span className="text-[9px] text-[#333]" title={formatFullDate(msg.timestamp)}>{formatMessageTime(msg.timestamp)}</span>
             {msg.edited && <span className="text-[9px] text-[#444]">edited</span>}
+            {msg.burn && <span className="text-[9px] text-[#FF453A]" title="Burns 30s after sending">🔥</span>}
           </div>
           )}
 
@@ -1081,6 +2294,54 @@ const MessageItem = memo(function MessageItem({
             </div>
           )}
 
+          {isPoll && msg.poll ? (
+            <div className={`w-64 sm:w-72 rounded-2xl border border-[#333]/60 p-3.5 shadow-lg bg-[#1C1C1E] ${isOwn ? 'rounded-br-sm' : 'rounded-bl-sm'}`}>
+              <div className="flex items-center justify-between gap-2 mb-0.5">
+                <p className="text-sm font-semibold text-white leading-snug">{msg.poll.question}</p>
+                {msg.burn && <span className="text-[10px] text-[#FF453A] shrink-0" title="Burns 30s after sending">🔥</span>}
+              </div>
+              <div className="flex items-center gap-2 mb-3">
+                {!isOwn && <Avatar name={msg.senderName} size="xs" />}
+                <span className="text-[11px] text-[#555]">{msg.senderName}</span>
+                <span className="text-[9px] text-[#444]" title={formatFullDate(msg.timestamp)}>{formatMessageTime(msg.timestamp)}</span>
+              </div>
+              <div className="space-y-1.5">
+                {msg.poll.options.map((opt, idx) => {
+                  const totalVotes = msg.poll!.options.reduce((s, o) => s + o.voters.length, 0);
+                  const count = opt.voters.length;
+                  const pct = totalVotes > 0 ? Math.round((count / totalVotes) * 100) : 0;
+                  const voted = opt.voters.includes(userUid || '');
+                  return (
+                    <button
+                      key={idx}
+                      onClick={() => onVote(msg.id, idx)}
+                      className={`relative w-full text-left px-3 py-2 rounded-xl border transition-all overflow-hidden ${
+                        voted
+                          ? 'border-[#007AFF]/60 bg-[#007AFF]/10'
+                          : 'border-[#2A2A2A] bg-[#0D0D0D] hover:border-[#444]'
+                      }`}
+                    >
+                      {count > 0 && (
+                        <div
+                          className="absolute inset-y-0 left-0 bg-[#007AFF]/15 transition-all"
+                          style={{ width: `${pct}%` }}
+                        />
+                      )}
+                      <div className="relative flex items-center gap-2">
+                        <span className="flex-1 text-xs text-[#E5E5E5] truncate">{opt.text}</span>
+                        <span className={`text-[11px] font-medium ${voted ? 'text-[#007AFF]' : 'text-[#666]'}`}>
+                          {count > 0 ? `${count} · ${pct}%` : '0'}
+                        </span>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="text-[10px] text-[#555] mt-2.5">
+                {msg.poll.options.reduce((s, o) => s + o.voters.length, 0)} vote{msg.poll.options.reduce((s, o) => s + o.voters.length, 0) !== 1 ? 's' : ''} · tap to vote
+              </p>
+            </div>
+          ) : (
           <div className={`relative group ${isImage || isFile ? '' : 'max-w-full'}`}>
             {isImage ? (
               <div
@@ -1201,6 +2462,7 @@ const MessageItem = memo(function MessageItem({
               )}
             </div>
           </div>
+          )}
 
           {msg.reactions && Object.keys(msg.reactions).length > 0 && (
             <div className={`flex flex-wrap gap-1 mt-1 ${isOwn ? 'justify-end' : 'justify-start'}`}>
@@ -1231,6 +2493,16 @@ const MessageItem = memo(function MessageItem({
                 </div>
               ))}
             </div>
+          )}
+
+          {isOwn && (msg.readers ?? 0) > 0 && (
+            <span className="text-[9px] text-[#555] mt-0.5 flex items-center gap-0.5" title={`Seen by ${msg.readers} member${msg.readers !== 1 ? 's' : ''}`}>
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3 h-3 text-[#007AFF]/70">
+                <path d="M10 12.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z" />
+                <path fillRule="evenodd" d="M.664 10.59a1.651 1.651 0 0 1 0-1.186A10.004 10.004 0 0 1 10 3c4.257 0 7.893 2.66 9.336 6.41.147.381.146.804 0 1.186A10.004 10.004 0 0 1 10 17c-4.257 0-7.893-2.66-9.336-6.41ZM14 10a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z" clipRule="evenodd" />
+              </svg>
+              {msg.readers}
+            </span>
           )}
         </div>
       )}

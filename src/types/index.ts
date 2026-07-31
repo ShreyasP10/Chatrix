@@ -11,6 +11,7 @@ export interface JoinedRoom {
 
   joinedAt: number;
   lastReadTimestamp: number | null;
+  tone?: 'pop' | 'ding' | 'soft' | 'none';
 }
 
 export interface ReplyTo {
@@ -38,12 +39,16 @@ export interface DecryptedMessage {
   senderUid: string;
   senderName: string;
   text: string;
-  type?: 'text' | 'image' | 'file';
+  type?: 'text' | 'image' | 'file' | 'poll' | 'sys';
   file?: FileInfo;
   replyTo?: ReplyTo;
   edited?: boolean;
   deleted?: boolean;
   reactions?: Record<string, string[]>;
+  poll?: PollData;
+  sys?: SysData;
+  readers?: number;
+  burn?: boolean;
   seq?: number;
   timestamp: number;
 }
@@ -111,4 +116,48 @@ export interface CallInvitation {
   inviterUid: string;
   inviterName: string;
   timestamp: number;
+}
+
+export interface PollOption {
+  text: string;
+  voters: string[];
+}
+
+export interface PollData {
+  question: string;
+  options: PollOption[];
+  multiple: boolean;
+}
+
+export interface SysData {
+  type: 'join' | 'remove' | 'kick';
+  uid: string;
+  name: string;
+  timestamp: number;
+}
+
+export interface RoomSettings {
+  slowModeSec: number;
+  blockedWords: string[];
+  frozen: boolean;
+  keyVersion: number;
+  autoDelete: boolean;
+  lastActivityAt: number | null;
+  createdAt: number;
+}
+
+export interface DeviceInfo {
+  name: string;
+  lastSeen: number;
+  online: boolean;
+  revoked: boolean;
+  createdAt: number;
+}
+
+export interface InviteInfo {
+  token: string;
+  expiresAt: number;
+  uses: number;
+  maxUses: number;
+  createdBy: string;
 }

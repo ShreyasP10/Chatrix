@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
   doc,
   getDoc,
@@ -16,6 +16,7 @@ import {
 import { db } from '../lib/firebase';
 import { localDB } from '../lib/db';
 import { deriveKey, decrypt } from '../lib/crypto';
+import { deleteRoomData } from '../lib/roomUtils';
 import { useStore } from '../store/useStore';
 import { useInstallPrompt } from '../hooks/useInstallPrompt';
 import { swSend } from '../lib/sw';
@@ -39,19 +40,134 @@ export default function Dashboard() {
   const [nameInput, setNameInput] = useState('');
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [createName, setCreateName] = useState('');
+  const [createType, setCreateType] = useState<'permanent' | 'auto'>('permanent');
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const { user, setUser, joinedRooms, setJoinedRooms, addJoinedRoom, removeJoinedRoom } = useStore();
   const { showPrompt, install } = useInstallPrompt();
   const nameInputRef = useRef<HTMLInputElement>(null);
   const createInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
+    if (searchParams.get('new') === '1') {
+      setShowCreateModal(true);
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+  }, [searchParams]);
+
+  useEffect(() => {
     localDB.joinedRooms.toArray().then((rooms) => {
       setJoinedRooms(rooms);
       const codes = rooms.map((r) => r.code);
       swSend({ type: 'WATCH_ROOMS', rooms: codes });
+      // Purge locally any room whose auto-delete timer expired (checked against Firestore below)
+      cleanupExpiredRooms(rooms);
     });
   }, [setJoinedRooms]);
+
+  // Join via invite link: /?code=1234&invite=token
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get('code');
+    const invite = params.get('invite');
+    if (code && user) {
+      if (invite) {
+        joinWithInvite(code, invite);
+      } else {
+        joinRoomByCode(code);
+      }
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+  }, [user]);
+
+  const cleanupExpiredRooms = async (rooms: { code: string; name: string; joinedAt: number; lastReadTimestamp: number | null }[]) => {
+    for (const room of rooms) {
+      try {
+        const snap = await getDoc(doc(db, 'rooms', room.code));
+        if (!snap.exists()) {
+          await localDB.joinedRooms.delete(room.code);
+          useStore.getState().removeJoinedRoom(room.code);
+          continue;
+        }
+        const data = snap.data();
+        if (data.autoDelete === true) {
+          const last = data.lastActivityAt?.toMillis?.() ?? null;
+          if (last === null || Date.now() - last > 3600000) {
+            deleteRoomData(room.code);
+            await localDB.joinedRooms.delete(room.code);
+            useStore.getState().removeJoinedRoom(room.code);
+          }
+        }
+      } catch {}
+    }
+    swSend({ type: 'WATCH_ROOMS', rooms: useStore.getState().joinedRooms.map((r) => r.code) });
+  };
+
+  const joinWithInvite = async (code: string, token: string) => {
+    try {
+      const snap = await getDoc(doc(db, 'rooms', code, 'invites', token));
+      if (!snap.exists()) {
+        setError('Invite link is invalid or already used');
+        return;
+      }
+      const inviteData = snap.data();
+      const expiresAt = inviteData.expiresAt?.toMillis?.() ?? 0;
+      if (expiresAt < Date.now() || (inviteData.uses ?? 0) >= (inviteData.maxUses ?? 1)) {
+        setError('Invite link has expired');
+        return;
+      }
+      await setDoc(
+        doc(db, 'rooms', code, 'invites', token),
+        { uses: (inviteData.uses ?? 0) + 1 },
+        { merge: true }
+      );
+    } catch {
+      setError('Could not validate invite');
+      return;
+    }
+    joinRoomByCode(code);
+  };
+
+  const joinRoomByCode = async (code: string) => {
+    const name = sanitizeRoomName(code);
+    if (!name || !user) return;
+    setLoading('join');
+    setError('');
+    try {
+      const snap = await getDoc(doc(db, 'rooms', name));
+      if (!snap.exists()) {
+        setError('Room not found');
+        setLoading('');
+        return;
+      }
+      const roomData = snap.data();
+      if (roomData.autoDelete === true) {
+        const last = roomData.lastActivityAt?.toMillis?.() ?? null;
+        if (last === null || Date.now() - last > 3600000) {
+          deleteRoomData(name);
+          setError('This room expired and was deleted');
+          setLoading('');
+          return;
+        }
+      }
+      const roomName = roomData?.name || `Room ${name}`;
+      await setDoc(doc(db, 'rooms', name, 'members', user.uid), { joinedAt: serverTimestamp(), name: user.name });
+      const room: JoinedRoom = {
+        code: name,
+        name: roomName,
+        joinedAt: Date.now(),
+        lastReadTimestamp: Date.now(),
+      };
+      await localDB.joinedRooms.put(room);
+      addJoinedRoom(room);
+      const allRooms = [...useStore.getState().joinedRooms.map((r) => r.code), name];
+      swSend({ type: 'WATCH_ROOMS', rooms: allRooms });
+      navigate(`/chat/${name}`);
+    } catch {
+      setError('Failed to join room');
+    }
+    setLoading('');
+  };
 
   useEffect(() => {
     if (user && Notification.permission === 'default') {
@@ -85,40 +201,12 @@ export default function Dashboard() {
   const joinRoom = async () => {
     const name = sanitizeRoomName(roomName);
     if (!name) return;
-    setLoading('join');
-    setError('');
-    try {
-      const snap = await getDoc(doc(db, 'rooms', name));
-      if (!snap.exists()) {
-        setError('Room not found');
-        setLoading('');
-        return;
-      }
-      const roomData = snap.data();
-      const roomName = roomData?.name || `Room ${name}`;
-      if (user) {
-        await setDoc(doc(db, 'rooms', name, 'members', user.uid), { joinedAt: serverTimestamp(), name: user.name });
-      }
-      const room: JoinedRoom = {
-        code: name,
-        name: roomName,
-        joinedAt: Date.now(),
-        lastReadTimestamp: Date.now(),
-      };
-      await localDB.joinedRooms.put(room);
-      addJoinedRoom(room);
-      const allRooms = [...useStore.getState().joinedRooms.map((r) => r.code), name];
-      swSend({ type: 'WATCH_ROOMS', rooms: allRooms });
-      navigate(`/chat/${name}`);
-    } catch {
-      setError('Failed to join room');
-    }
-    setLoading('');
+    await joinRoomByCode(name);
   };
-
 
   const openCreateModal = () => {
     setCreateName('');
+    setCreateType('permanent');
     setShowCreateModal(true);
     setTimeout(() => createInputRef.current?.focus(), 50);
   };
@@ -145,10 +233,11 @@ export default function Dashboard() {
     try {
       await setDoc(doc(db, 'rooms', newCode), {
         name: finalName,
-
         createdAt: serverTimestamp(),
         createdBy: user?.uid,
         displayName: roomName.trim(),
+        autoDelete: createType === 'auto',
+        lastActivityAt: serverTimestamp(),
       });
       if (user) {
         await setDoc(doc(db, 'rooms', newCode, 'members', user.uid), { joinedAt: serverTimestamp(), name: user.name });
@@ -367,6 +456,41 @@ export default function Dashboard() {
                   maxLength={30}
                   className="w-full bg-[#0D0D0D] text-white text-sm rounded-xl px-4 py-3 outline-none border border-[#333] focus:border-[#555] transition-colors placeholder-[#555]"
                 />
+                <div className="mt-4 space-y-2">
+                  <p className="text-[11px] text-[#555] font-medium uppercase tracking-wider">Room type</p>
+                  <button
+                    onClick={() => setCreateType('permanent')}
+                    className={`w-full flex items-center gap-3 p-3 rounded-xl border transition-all text-left ${
+                      createType === 'permanent'
+                        ? 'border-[#007AFF] bg-[#007AFF]/10'
+                        : 'border-[#333] bg-[#0D0D0D] hover:border-[#555]'
+                    }`}
+                  >
+                    <div className={`w-4 h-4 rounded-full border-2 flex items-center justify-center shrink-0 ${createType === 'permanent' ? 'border-[#007AFF]' : 'border-[#555]'}`}>
+                      {createType === 'permanent' && <div className="w-2 h-2 rounded-full bg-[#007AFF]" />}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-white">Permanent</p>
+                      <p className="text-[11px] text-[#555] mt-0.5">Room stays forever until removed</p>
+                    </div>
+                  </button>
+                  <button
+                    onClick={() => setCreateType('auto')}
+                    className={`w-full flex items-center gap-3 p-3 rounded-xl border transition-all text-left ${
+                      createType === 'auto'
+                        ? 'border-[#FF3B30] bg-[#FF3B30]/10'
+                        : 'border-[#333] bg-[#0D0D0D] hover:border-[#555]'
+                    }`}
+                  >
+                    <div className={`w-4 h-4 rounded-full border-2 flex items-center justify-center shrink-0 ${createType === 'auto' ? 'border-[#FF3B30]' : 'border-[#555]'}`}>
+                      {createType === 'auto' && <div className="w-2 h-2 rounded-full bg-[#FF3B30]" />}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-white">Auto-delete</p>
+                      <p className="text-[11px] text-[#555] mt-0.5">Room is deleted 1 hour after the last message</p>
+                    </div>
+                  </button>
+                </div>
               </div>
               <div className="flex gap-3 px-5 pb-5">
                 <button
@@ -471,9 +595,11 @@ function RoomItem({
     const now = new Date();
     const diff = now.getTime() - d.getTime();
     if (diff < 60000) return 'Just now';
-    if (diff < 3600000) return `${Math.floor(diff / 60000)}m`;
-    if (diff < 86400000) return `${Math.floor(diff / 3600000)}h`;
-    if (diff < 604800000) return `${Math.floor(diff / 86400000)}d`;
+    if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
+    if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`;
+    const dayDiff = Math.floor(diff / 86400000);
+    if (dayDiff === 1) return 'Yesterday';
+    if (dayDiff < 7) return d.toLocaleDateString(undefined, { weekday: 'short' });
     return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
   };
 
@@ -515,7 +641,7 @@ function RoomItem({
             )}
           </p>
           {preview && (
-            <span className="text-[10px] text-[#555] shrink-0 font-medium">
+            <span className="text-[10px] text-[#555] shrink-0 font-medium" title={new Date(preview.timestamp).toLocaleString()}>
               {formatTime(preview.timestamp)}
             </span>
           )}

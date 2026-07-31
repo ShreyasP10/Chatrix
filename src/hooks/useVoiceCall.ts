@@ -13,6 +13,7 @@ import {
   getDocs,
 } from 'firebase/firestore';
 import { db } from '../lib/firebase';
+import { swSend } from '../lib/sw';
 import { useStore } from '../store/useStore';
 import type { CallParticipant, CallInvitation } from '../types';
 
@@ -320,6 +321,31 @@ export function useVoiceCall(roomCode: string | undefined) {
       }
     }
   }, [inCall, roomCode, user, callParticipants, connectToPeer]);
+
+  // Wake lock + persistent in-call notification
+  useEffect(() => {
+    if (!inCall) return;
+    let wakeLock: any = null;
+    try {
+      (navigator as any).wakeLock?.request?.('screen')
+        .then((lock: any) => { wakeLock = lock; })
+        .catch(() => {});
+    } catch {}
+    swSend({ type: 'CALL_ACTIVE', roomCode });
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        try {
+          (navigator as any).wakeLock?.request?.('screen').then((lock: any) => { wakeLock = lock; }).catch(() => {});
+        } catch {}
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      try { wakeLock?.release?.().catch(() => {}); } catch {}
+      swSend({ type: 'CALL_IDLE' });
+    };
+  }, [inCall, roomCode]);
 
   const joinCall = useCallback(async () => {
     if (!roomCode || !user || connectingRef.current) return;
