@@ -1,8 +1,9 @@
 import { onDocumentCreated, onDocumentDeleted } from 'firebase-functions/v2/firestore';
 import { onCall } from 'firebase-functions/v2/https';
+import { onSchedule } from 'firebase-functions/v2/scheduler';
 import { defineSecret } from 'firebase-functions/params';
 import { initializeApp } from 'firebase-admin/app';
-import { getFirestore } from 'firebase-admin/firestore';
+import { FieldValue, getFirestore } from 'firebase-admin/firestore';
 import { getMessaging } from 'firebase-admin/messaging';
 import { AccessToken } from 'livekit-server-sdk';
 
@@ -98,5 +99,41 @@ export const onCallEnded = onDocumentDeleted(
         },
       });
     } catch {}
+  }
+);
+
+// Moves due scheduled messages (pre-encrypted by the client) into the room's
+// message collection. The client encrypts at scheduling time, so the server
+// only copies the ciphertext when `sendAtMs` elapses.
+export const processScheduledMessages = onSchedule(
+  { schedule: 'every 1 minutes', timezone: 'UTC' },
+  async () => {
+    const db = getFirestore();
+    const now = Date.now();
+    const snap = await db
+      .collection('scheduled')
+      .where('sendAtMs', '<=', now)
+      .limit(200)
+      .get();
+
+    for (const doc of snap.docs) {
+      const d = doc.data();
+      const roomCode = d.roomCode;
+      if (!roomCode) {
+        await doc.ref.delete().catch(() => {});
+        continue;
+      }
+      const { roomCode: _rc, sendAtMs: _ts, ...msgData } = d;
+      try {
+        await db.collection(`rooms/${roomCode}/messages`).add({
+          ...msgData,
+          timestamp: FieldValue.serverTimestamp(),
+          seq: Date.now(),
+          scheduled: true,
+        });
+        await db.doc(`rooms/${roomCode}`).update({ lastActivityAt: FieldValue.serverTimestamp() }).catch(() => {});
+      } catch {}
+      await doc.ref.delete().catch(() => {});
+    }
   }
 );

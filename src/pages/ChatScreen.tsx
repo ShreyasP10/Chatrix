@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, memo, Fragment } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo, memo, Fragment } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import {
   collection,
@@ -29,7 +29,7 @@ import EmojiPicker from '../components/EmojiPicker';
 import VoiceCallUI from '../components/VoiceCallUI';
 import { useVoiceCall } from '../hooks/useVoiceCall';
 import { QRCodeSVG } from 'qrcode.react';
-import type { DecryptedMessage, ReplyTo, TypingUser, RoomSettings } from '../types';
+import type { DecryptedMessage, ReplyTo, TypingUser, RoomSettings, ScheduledMsg } from '../types';
 
 const PAGE_SIZE = 50;
 const TYPING_TIMEOUT = 2000;
@@ -79,6 +79,12 @@ export default function ChatScreen() {
   const [mentionQuery, setMentionQuery] = useState('');
   const [mentionStartIndex, setMentionStartIndex] = useState(-1);
   const [mentionSelectedIndex, setMentionSelectedIndex] = useState(0);
+  const [showSearch, setShowSearch] = useState(false);
+  const [showSchedule, setShowSchedule] = useState(false);
+  const [scheduleTime, setScheduleTime] = useState('');
+  const [scheduledMsgs, setScheduledMsgs] = useState<ScheduledMsg[]>([]);
+  const [highlightMsgId, setHighlightMsgId] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
   const lastDocRef = useRef<any>(null);
@@ -90,6 +96,8 @@ export default function ChatScreen() {
   const inputRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const roomNameInputRef = useRef<HTMLInputElement>(null);
+  const msgElRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const indexedIdsRef = useRef<Set<string>>(new Set());
   const seenMsgIds = useRef<Set<string>>(new Set());
   const burnScheduledRef = useRef<Set<string>>(new Set());
   const lastReadSeqRef = useRef(0);
@@ -581,6 +589,7 @@ export default function ChatScreen() {
       senderName: msg.senderName,
       senderUid: msg.senderUid,
       text: msg.text.slice(0, 80),
+      threadRootId: msg.threadRootId || msg.id,
     });
     inputRef.current?.focus();
   };
@@ -623,6 +632,7 @@ export default function ChatScreen() {
 
     if (replyTo) {
       payload.replyTo = { messageId: replyTo.messageId, senderName: replyTo.senderName, text: replyTo.text };
+      payload.threadRootId = replyTo.threadRootId || replyTo.messageId;
       msgData.replyToUid = replyTo.senderUid;
     }
 
@@ -782,6 +792,187 @@ export default function ChatScreen() {
     if (t !== 'none') playTone(t);
   };
 
+  // Index decrypted messages locally (IndexedDB) for instant chat search
+  useEffect(() => {
+    if (!code || messages.length === 0) return;
+    const entries = messages
+      .filter((m) => m.text && m.type !== 'image' && m.type !== 'file' && !indexedIdsRef.current.has(m.id))
+      .map((m) => ({
+        msgId: m.id,
+        roomCode: code,
+        text: m.text,
+        senderName: m.senderName,
+        senderUid: m.senderUid,
+        timestamp: m.timestamp,
+        seq: m.seq ?? 0,
+      }));
+    if (entries.length === 0) return;
+    entries.forEach((e) => indexedIdsRef.current.add(e.msgId));
+    localDB.searchIndex.bulkPut(entries).catch(() => {});
+  }, [messages, code]);
+
+  const scrollToMessage = (targetId: string) => {
+    const el = msgElRefs.current[targetId];
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      setHighlightMsgId(targetId);
+      setTimeout(() => setHighlightMsgId((h) => (h === targetId ? null : h)), 1800);
+    } else {
+      showToast('That message is in older history and not loaded');
+    }
+  };
+
+  const jumpToThread = (rootId: string) => {
+    const replies = messages.filter((m) => m.threadRootId === rootId);
+    if (replies.length === 0) return;
+    scrollToMessage(replies[replies.length - 1].id);
+  };
+
+  const loadScheduled = useCallback(async () => {
+    if (!code) return;
+    try {
+      const list = await localDB.scheduled.where('roomCode').equals(code).sortBy('sendAtMs');
+      setScheduledMsgs(list);
+    } catch {}
+  }, [code]);
+
+  useEffect(() => {
+    loadScheduled();
+    const t = setInterval(async () => {
+      if (!code) return;
+      const list = await localDB.scheduled.where('roomCode').equals(code).toArray();
+      for (const s of list) {
+        try {
+          const snap = await getDoc(doc(db, 'scheduled', s.id));
+          if (!snap.exists()) {
+            await localDB.scheduled.delete(s.id);
+            setScheduledMsgs((prev) => prev.filter((x) => x.id !== s.id));
+            showToast('Scheduled message sent');
+          }
+        } catch {}
+      }
+    }, 15000);
+    return () => clearInterval(t);
+  }, [code, loadScheduled]);
+
+  const scheduleMessage = async (sendAtMs: number) => {
+    const text = input.trim();
+    if (!text || !code || !cryptoKey || !user) {
+      showToast('Nothing to schedule');
+      return;
+    }
+    if (sendAtMs <= Date.now()) {
+      showToast('Pick a time in the future');
+      return;
+    }
+    const payload: any = { text, type: 'text' };
+    if (replyTo) {
+      payload.replyTo = { messageId: replyTo.messageId, senderName: replyTo.senderName, text: replyTo.text };
+      payload.threadRootId = replyTo.threadRootId || replyTo.messageId;
+    }
+    try {
+      const { ciphertext, iv } = await encrypt(JSON.stringify(payload), cryptoKey);
+      const msgData: any = {
+        roomCode: code,
+        senderUid: user.uid,
+        senderName: user.name,
+        ciphertext,
+        iv,
+        kv: roomKeyVersion,
+        sendAtMs,
+      };
+      const mentionedUids = parseMentions(text, memberNameMap);
+      if (mentionedUids.length > 0) msgData.mentionedUids = mentionedUids;
+      if (burnEnabled) msgData.burn = true;
+      if (replyTo) msgData.replyToUid = replyTo.senderUid;
+      const ref = await addDoc(collection(db, 'scheduled'), msgData);
+      await localDB.scheduled.put({ id: ref.id, roomCode: code, sendAtMs, textPreview: text.slice(0, 60) });
+      setInput('');
+      setReplyTo(null);
+      setShowSchedule(false);
+      showToast(`Scheduled for ${new Date(sendAtMs).toLocaleString()}`);
+      loadScheduled();
+    } catch {
+      showToast('Failed to schedule message');
+    }
+  };
+
+  const cancelScheduled = async (id: string) => {
+    try {
+      await deleteDoc(doc(db, 'scheduled', id));
+      await localDB.scheduled.delete(id);
+      setScheduledMsgs((prev) => prev.filter((x) => x.id !== id));
+      showToast('Scheduled message cancelled');
+    } catch {
+      showToast('Failed to cancel');
+    }
+  };
+
+  const fetchAllMessages = async () => {
+    if (!code) return [] as any[];
+    const out: any[] = [];
+    let last: any = null;
+    for (let i = 0; i < 20; i++) {
+      const q = last
+        ? query(collection(db, 'rooms', code, 'messages'), orderBy('seq', 'desc'), startAfter(last), limit(500))
+        : query(collection(db, 'rooms', code, 'messages'), orderBy('seq', 'desc'), limit(500));
+      const snap = await getDocs(q);
+      if (snap.empty) break;
+      out.push(...snap.docs);
+      last = snap.docs[snap.docs.length - 1];
+      if (snap.docs.length < 500) break;
+    }
+    return out;
+  };
+
+  const exportChat = async (format: 'json' | 'txt') => {
+    if (!code || exporting) return;
+    setExporting(true);
+    try {
+      const docs = await fetchAllMessages();
+      const rows: { time: string; sender: string; message: string }[] = [];
+      for (const d of docs) {
+        const data = d.data();
+        let text = '';
+        if (data.sys) {
+          text = data.sys.type === 'join' ? `🟢 ${data.sys.name} joined` : `🚫 ${data.sys.name} removed`;
+        } else if (data.poll) {
+          text = `📊 ${data.poll.question}`;
+        } else {
+          const key = keys[data.kv ?? 0];
+          if (key) {
+            try {
+              const dec = await decrypt(data.ciphertext, data.iv, key);
+              const parsed = JSON.parse(dec);
+              text = parsed.type === 'image' ? '[Image]' : parsed.type === 'file' ? `[File: ${parsed.file?.name || 'file'}]` : (parsed.text || dec);
+            } catch {
+              text = '[Cannot decrypt]';
+            }
+          } else {
+            text = '[Encrypted]';
+          }
+        }
+        rows.push({
+          time: new Date(data.timestamp?.toMillis?.() ?? Date.now()).toLocaleString(),
+          sender: data.senderName || data.sys?.name || '',
+          message: text,
+        });
+      }
+      rows.sort((a, b) => new Date(a.time).getTime() - new Date(b.time).getTime());
+      const stamp = new Date().toISOString().slice(0, 10);
+      const filename = `chatrix-${code}-${stamp}`;
+      if (format === 'json') {
+        downloadBlob(JSON.stringify({ room: code, exportedAt: new Date().toISOString(), messages: rows }, null, 2), `${filename}.json`, 'application/json');
+      } else {
+        downloadBlob(rows.map((r) => `[${r.time}] ${r.sender}: ${r.message}`).join('\n'), `${filename}.txt`, 'text/plain');
+      }
+      showToast(`Exported ${rows.length} message${rows.length !== 1 ? 's' : ''}`);
+    } catch {
+      showToast('Export failed');
+    }
+    setExporting(false);
+  };
+
   const handleEdit = (msg: DecryptedMessage) => {
     setEditingId(msg.id);
     setInput(msg.text);
@@ -916,6 +1107,14 @@ export default function ChatScreen() {
         ? `${typingUsers[0].name} and ${typingUsers[1].name} are typing...`
         : `${typingUsers[0].name} and ${typingUsers.length - 1} others are typing...`;
 
+  const replyCounts = useMemo(() => {
+    const map: Record<string, number> = {};
+    for (const m of messages) {
+      if (m.threadRootId) map[m.threadRootId] = (map[m.threadRootId] ?? 0) + 1;
+    }
+    return map;
+  }, [messages]);
+
   return (
     <div className={`flex flex-col h-dvh max-w-md md:max-w-lg lg:max-w-xl mx-auto ${voiceCall.inCall ? 'pb-[58px]' : ''}`} style={{ background: 'radial-gradient(ellipse at 50% 0%, #0a0a0f 0%, #000 70%)' }}>
       <header className="flex items-center gap-3 px-4 py-3 border-b border-[#222] shrink-0 bg-black/50 backdrop-blur-sm">
@@ -997,6 +1196,15 @@ export default function ChatScreen() {
           </svg>
         </button>
         <button
+          onClick={() => setShowSearch(true)}
+          className="p-2 rounded-lg transition-all shrink-0 text-[#555] hover:text-white hover:bg-white/5"
+          title="Search messages"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5">
+            <path fillRule="evenodd" d="M9 3.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11ZM2 9a7 7 0 1 1 12.452 4.391l3.328 3.329a.75.75 0 1 1-1.06 1.06l-3.329-3.328A7 7 0 0 1 2 9Z" clipRule="evenodd" />
+          </svg>
+        </button>
+        <button
           onClick={() => setShowShare(true)}
           className="p-2 rounded-lg transition-all shrink-0 text-[#555] hover:text-white hover:bg-white/5"
           title="Share room"
@@ -1052,8 +1260,15 @@ export default function ChatScreen() {
           </div>
         )}
 
-        {messages.map((msg, i) => (
-          <Fragment key={msg.id}>
+        {messages.map((msg, i) => {
+          const replyCount = replyCounts[msg.id] || 0;
+          return (
+          <div
+            key={msg.id}
+            ref={(el) => { msgElRefs.current[msg.id] = el; }}
+            className={`rounded-xl transition-colors ${highlightMsgId === msg.id ? 'bg-[#FF9F0A]/10 px-1.5' : ''}`}
+          >
+            <Fragment>
             {(i === 0 || !isSameDay(messages[i - 1].timestamp, msg.timestamp)) && (
               <DateSeparator ts={msg.timestamp} />
             )}
@@ -1074,9 +1289,14 @@ export default function ChatScreen() {
               onReactingOpen={setReactingMsgId}
               resolveName={(uid) => memberList.find((m) => m.uid === uid)?.name || uid.slice(0, 6)}
               prevSenderSame={i > 0 && messages[i - 1].senderUid === msg.senderUid}
+              replyCount={replyCount}
+              onJumpToMessage={scrollToMessage}
+              onJumpToThread={jumpToThread}
             />
-          </Fragment>
-        ))}
+            </Fragment>
+          </div>
+          );
+        })}
         <div ref={bottomRef} />
       </div>
 
@@ -2031,7 +2251,7 @@ async function decryptMessage(data: any, id: string, keys: Record<number, Crypto
       edited: data.edited || false,
       deleted: data.deleted || false,
       reactions: data.reactions || undefined,
-      readers: data.readers?.length || 0,
+      readerUids: data.readers ?? [],
       burn: data.burn || false,
       seq: data.seq ?? undefined,
       timestamp: data.timestamp?.toMillis() ?? Date.now(),
@@ -2495,14 +2715,22 @@ const MessageItem = memo(function MessageItem({
             </div>
           )}
 
-          {isOwn && (msg.readers ?? 0) > 0 && (
-            <span className="text-[9px] text-[#555] mt-0.5 flex items-center gap-0.5" title={`Seen by ${msg.readers} member${msg.readers !== 1 ? 's' : ''}`}>
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3 h-3 text-[#007AFF]/70">
-                <path d="M10 12.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z" />
-                <path fillRule="evenodd" d="M.664 10.59a1.651 1.651 0 0 1 0-1.186A10.004 10.004 0 0 1 10 3c4.257 0 7.893 2.66 9.336 6.41.147.381.146.804 0 1.186A10.004 10.004 0 0 1 10 17c-4.257 0-7.893-2.66-9.336-6.41ZM14 10a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z" clipRule="evenodd" />
-              </svg>
-              {msg.readers}
-            </span>
+          {isOwn && (msg.readerUids ?? []).length > 0 && (
+            <div
+              className="mt-1 flex items-center justify-end"
+              title={`Seen by ${msg.readerUids!.map(resolveName).join(', ')}`}
+            >
+              <div className="flex -space-x-1.5">
+                {msg.readerUids!.slice(0, 5).map((uid) => (
+                  <div key={uid} className="rounded-full ring-2 ring-[#0A0A0A] overflow-hidden">
+                    <Avatar name={resolveName(uid) || uid.slice(0, 6)} size="xs" />
+                  </div>
+                ))}
+              </div>
+              {msg.readerUids!.length > 5 && (
+                <span className="text-[9px] text-[#555] ml-1">+{msg.readerUids!.length - 5}</span>
+              )}
+            </div>
           )}
         </div>
       )}

@@ -19,6 +19,7 @@ export interface ReplyTo {
   senderName: string;
   senderUid: string;
   text: string;
+  threadRootId?: string;
 }
 
 export interface FileInfo {
@@ -47,10 +48,29 @@ export interface DecryptedMessage {
   reactions?: Record<string, string[]>;
   poll?: PollData;
   sys?: SysData;
-  readers?: number;
+  readerUids?: string[];
+  threadRootId?: string;
+  replies?: number;
   burn?: boolean;
   seq?: number;
   timestamp: number;
+}
+
+export interface ScheduledMsg {
+  id: string;
+  roomCode: string;
+  sendAtMs: number;
+  textPreview: string;
+}
+
+export interface SearchIndexEntry {
+  msgId: string;
+  roomCode: string;
+  text: string;
+  senderName: string;
+  senderUid: string;
+  timestamp: number;
+  seq: number;
 }
 
 export interface FirestoreUser {

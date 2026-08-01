@@ -290,7 +290,7 @@ export default function Dashboard() {
       const snap = await getDocs(q);
       if (snap.empty) return null;
       const data = snap.docs[0].data();
-      const key = await deriveKey(roomCode);
+      const key = await deriveKey(roomCode, data.kv ?? 0);
       const decrypted = await decrypt(data.ciphertext, data.iv, key);
       const parsed = JSON.parse(decrypted);
       const isImage = parsed.type === 'image' || parsed.type === 'gif';
@@ -557,18 +557,34 @@ function RoomItem({
 }) {
   const [preview, setPreview] = useState<{ text: string; timestamp: number; senderUid: string; senderName: string } | null>(null);
   const [memberCount, setMemberCount] = useState<number | null>(null);
+  const [showDelete, setShowDelete] = useState(false);
 
   const [roomName, setRoomName] = useState(room.name || '');
 
   const { user } = useStore();
 
+  const pressTimerRef = useRef<number | null>(null);
+  const longPressedRef = useRef(false);
+
+  const startPress = () => {
+    longPressedRef.current = false;
+    pressTimerRef.current = window.setTimeout(() => {
+      longPressedRef.current = true;
+      setShowDelete(true);
+    }, 500);
+  };
+
+  const cancelPress = () => {
+    if (pressTimerRef.current !== null) {
+      clearTimeout(pressTimerRef.current);
+      pressTimerRef.current = null;
+    }
+  };
+
   useEffect(() => {
     let cancelled = false;
     getLastMessage(room.code).then((msg) => {
       if (msg && !cancelled) setPreview(msg);
-    });
-    getDocs(collection(db, 'rooms', room.code, 'members')).then((snap) => {
-      if (!cancelled) setMemberCount(snap.size);
     });
     // Fetch room name from Firestore (for rooms that may not have name stored locally)
     getDoc(doc(db, 'rooms', room.code)).then((snap) => {
@@ -586,6 +602,18 @@ function RoomItem({
         const data = snap.data();
         if (data.name) setRoomName(data.name);
       }
+    });
+    return unsub;
+  }, [room.code]);
+
+  useEffect(() => {
+    const q = query(collection(db, 'rooms', room.code, 'members'));
+    const unsub = onSnapshot(q, (snap) => {
+      let count = 0;
+      snap.forEach((d) => {
+        if (!d.data().kicked) count++;
+      });
+      setMemberCount(count);
     });
     return unsub;
   }, [room.code]);
@@ -614,8 +642,23 @@ function RoomItem({
 
   return (
     <button
-      onClick={onEnter}
-      className="w-full flex items-center gap-3 p-3 rounded-2xl border border-[#222] bg-[#0D0D0D] text-left hover:bg-[#141414] hover:border-[#333] transition-all active:scale-[0.98] group"
+      onClick={() => {
+        if (longPressedRef.current) {
+          longPressedRef.current = false;
+          return;
+        }
+        if (showDelete) {
+          setShowDelete(false);
+          return;
+        }
+        onEnter();
+      }}
+      onPointerDown={startPress}
+      onPointerUp={cancelPress}
+      onPointerLeave={cancelPress}
+      onPointerCancel={cancelPress}
+      onContextMenu={(e) => e.preventDefault()}
+      className="w-full flex items-center gap-3 p-3 rounded-2xl border border-[#222] bg-[#0D0D0D] text-left hover:bg-[#141414] hover:border-[#333] transition-all active:scale-[0.98] group select-none touch-manipulation"
     >
       <div
         className="w-11 h-11 rounded-xl flex items-center justify-center font-bold text-white text-sm shrink-0 shadow-lg"
@@ -663,7 +706,7 @@ function RoomItem({
       <div className="flex items-center gap-1">
         <button
           onClick={(e) => { e.stopPropagation(); onDelete(); }}
-          className="text-[#333] hover:text-red-400 p-1 rounded-lg hover:bg-red-400/5 transition-all opacity-0 group-hover:opacity-100"
+          className={`text-[#333] hover:text-red-400 p-1 rounded-lg hover:bg-red-400/5 transition-all ${showDelete ? 'opacity-100' : 'opacity-0 md:group-hover:opacity-100'}`}
           title="Remove room"
         >
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
