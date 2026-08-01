@@ -106,7 +106,7 @@ export const onCallEnded = onDocumentDeleted(
 // message collection. The client encrypts at scheduling time, so the server
 // only copies the ciphertext when `sendAtMs` elapses.
 export const processScheduledMessages = onSchedule(
-  { schedule: 'every 1 minutes', timezone: 'UTC' },
+  { schedule: 'every 1 minutes', timeZone: 'UTC' },
   async () => {
     const db = getFirestore();
     const now = Date.now();

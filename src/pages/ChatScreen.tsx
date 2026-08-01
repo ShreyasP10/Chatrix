@@ -29,7 +29,7 @@ import EmojiPicker from '../components/EmojiPicker';
 import VoiceCallUI from '../components/VoiceCallUI';
 import { useVoiceCall } from '../hooks/useVoiceCall';
 import { QRCodeSVG } from 'qrcode.react';
-import type { DecryptedMessage, ReplyTo, TypingUser, RoomSettings, ScheduledMsg } from '../types';
+import type { DecryptedMessage, ReplyTo, TypingUser, RoomSettings, ScheduledMsg, SearchIndexEntry } from '../types';
 
 const PAGE_SIZE = 50;
 const TYPING_TIMEOUT = 2000;
@@ -636,6 +636,14 @@ export default function ChatScreen() {
       msgData.replyToUid = replyTo.senderUid;
     }
 
+    if (editingId) {
+      const orig = messages.find((m) => m.id === editingId);
+      if (orig?.threadRootId) payload.threadRootId = orig.threadRootId;
+      if (orig?.replyTo) {
+        payload.replyTo = { messageId: orig.replyTo.messageId, senderName: orig.replyTo.senderName, text: orig.replyTo.text };
+      }
+    }
+
     const mentionedUids = parseMentions(text, memberNameMap);
     if (mentionedUids.length > 0) {
       msgData.mentionedUids = mentionedUids;
@@ -865,6 +873,16 @@ export default function ChatScreen() {
       showToast('Pick a time in the future');
       return;
     }
+    if (roomSettings?.frozen && user.uid !== roomOwnerUid) {
+      showToast('Room is frozen by the owner');
+      return;
+    }
+    const lower = text.toLowerCase();
+    const blocked = (roomSettings?.blockedWords || []).find((w) => w && lower.includes(w.toLowerCase()));
+    if (blocked) {
+      showToast(`Message blocked (filtered word: "${blocked}")`);
+      return;
+    }
     const payload: any = { text, type: 'text' };
     if (replyTo) {
       payload.replyTo = { messageId: replyTo.messageId, senderName: replyTo.senderName, text: replyTo.text };
@@ -889,6 +907,7 @@ export default function ChatScreen() {
       await localDB.scheduled.put({ id: ref.id, roomCode: code, sendAtMs, textPreview: text.slice(0, 60) });
       setInput('');
       setReplyTo(null);
+      setEditingId(null);
       setShowSchedule(false);
       showToast(`Scheduled for ${new Date(sendAtMs).toLocaleString()}`);
       loadScheduled();
@@ -1065,8 +1084,12 @@ export default function ChatScreen() {
       if (!isImage) {
         payload.file = { name: file.name, size: file.size, mimeType: file.type };
       }
+      if (replyTo) {
+        payload.replyTo = { messageId: replyTo.messageId, senderName: replyTo.senderName, text: replyTo.text };
+        payload.threadRootId = replyTo.threadRootId || replyTo.messageId;
+      }
       const { ciphertext, iv } = await encrypt(JSON.stringify(payload), cryptoKey);
-      await addDoc(collection(db, 'rooms', code, 'messages'), {
+      const msgData: any = {
         senderUid: user.uid,
         senderName: user.name,
         ciphertext,
@@ -1074,7 +1097,9 @@ export default function ChatScreen() {
         timestamp: serverTimestamp(),
         seq: Date.now(),
         kv: roomKeyVersion,
-      });
+      };
+      if (replyTo) msgData.replyToUid = replyTo.senderUid;
+      await addDoc(collection(db, 'rooms', code, 'messages'), msgData);
       updateDoc(doc(db, 'rooms', code), { lastActivityAt: serverTimestamp() }).catch(() => {});
       updateDoc(doc(db, 'rooms', code, 'members', user.uid), { lastSpokeAt: serverTimestamp() }).catch(() => {});
     } catch {}
@@ -1114,6 +1139,21 @@ export default function ChatScreen() {
     }
     return map;
   }, [messages]);
+
+  const schedulePresets = useMemo(() => {
+    const tonight = new Date();
+    tonight.setHours(21, 0, 0, 0);
+    if (tonight.getTime() <= Date.now()) tonight.setDate(tonight.getDate() + 1);
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    tomorrow.setHours(9, 0, 0, 0);
+    return [
+      { label: 'In 1 hour', ms: Date.now() + 3600_000 },
+      { label: 'In 3 hours', ms: Date.now() + 3 * 3600_000 },
+      { label: 'Tonight 9 PM', ms: tonight.getTime() },
+      { label: 'Tomorrow 9 AM', ms: tomorrow.getTime() },
+    ];
+  }, []);
 
   return (
     <div className={`flex flex-col h-dvh max-w-md md:max-w-lg lg:max-w-xl mx-auto ${voiceCall.inCall ? 'pb-[58px]' : ''}`} style={{ background: 'radial-gradient(ellipse at 50% 0%, #0a0a0f 0%, #000 70%)' }}>
@@ -1346,6 +1386,75 @@ export default function ChatScreen() {
             onClose={() => setShowEmojiPicker(false)}
           />
         )}
+        {showSchedule && (
+          <div className="mb-2 bg-[#1C1C1E] border border-[#333] rounded-2xl p-3 animate-fade-in">
+            <p className="text-xs font-semibold text-white mb-2 flex items-center gap-1.5">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 text-[#FF9F0A]">
+                <path fillRule="evenodd" d="M10 18a8 8 0 1 0 0-16 8 8 0 0 0 0 16Zm.75-13a.75.75 0 0 0-1.5 0v5c0 .414.336.75.75.75h4a.75.75 0 0 0 0-1.5h-3.25V5Z" clipRule="evenodd" />
+              </svg>
+              Schedule message
+              <button onClick={() => setShowSchedule(false)} className="ml-auto text-[#555] hover:text-white">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4"><path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z" /></svg>
+              </button>
+            </p>
+            {input.trim() ? (
+              <p className="text-[11px] text-[#555] truncate mb-2 bg-[#0D0D0D] rounded-lg px-3 py-1.5">
+                “{input.trim().slice(0, 60)}”
+              </p>
+            ) : (
+              <p className="text-[11px] text-[#FF9F0A] mb-2">Type a message first, then pick a time.</p>
+            )}
+            <div className="flex flex-wrap gap-1.5 mb-2">
+              {schedulePresets.map((p) => (
+                <button
+                  key={p.label}
+                  onClick={() => scheduleMessage(p.ms)}
+                  className="px-3 py-1.5 rounded-lg text-xs font-medium border border-[#FF9F0A]/40 text-[#FF9F0A] bg-[#FF9F0A]/10 hover:bg-[#FF9F0A]/20 transition-all"
+                >
+                  {p.label}
+                </button>
+              ))}
+            </div>
+            <div className="flex gap-2">
+              <input
+                type="datetime-local"
+                value={scheduleTime}
+                min={new Date(Date.now() + 60000).toISOString().slice(0, 16)}
+                onChange={(e) => setScheduleTime(e.target.value)}
+                className="flex-1 bg-[#0D0D0D] text-white text-xs rounded-lg px-3 py-2 outline-none border border-[#333] focus:border-[#555] [color-scheme:dark]"
+              />
+              <button
+                onClick={() => {
+                  if (!scheduleTime) return;
+                  scheduleMessage(new Date(scheduleTime).getTime());
+                }}
+                className="px-3.5 py-2 rounded-lg bg-[#FF9F0A] text-black text-xs font-semibold hover:bg-[#FFB340] transition-colors shrink-0"
+              >
+                Schedule
+              </button>
+            </div>
+            {scheduledMsgs.length > 0 && (
+              <div className="mt-3 space-y-1">
+                <p className="text-[10px] text-[#555] font-medium uppercase tracking-wider">Scheduled</p>
+                {scheduledMsgs.map((s) => (
+                  <div key={s.id} className="flex items-center gap-2 bg-[#0D0D0D] border border-[#222] rounded-lg px-3 py-1.5">
+                    <div className="flex-1 min-w-0">
+                      <p className="text-[11px] text-[#ccc] truncate">{s.textPreview}</p>
+                      <p className="text-[10px] text-[#555]">{new Date(s.sendAtMs).toLocaleString()}</p>
+                    </div>
+                    <button
+                      onClick={() => cancelScheduled(s.id)}
+                      className="text-[#555] hover:text-red-400 p-1 shrink-0"
+                      title="Cancel"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4"><path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z" /></svg>
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
         {showPollForm && (
           <div className="mb-2 bg-[#1C1C1E] border border-[#333] rounded-2xl p-3 animate-fade-in">
             <p className="text-xs font-semibold text-white mb-2 flex items-center gap-1.5">
@@ -1494,6 +1603,15 @@ export default function ChatScreen() {
             </svg>
           </button>
           <button
+            onClick={() => setShowSchedule(!showSchedule)}
+            className={`shrink-0 transition-colors p-1 rounded-lg hover:bg-white/5 ${showSchedule ? 'text-[#FF9F0A] bg-[#FF9F0A]/10' : 'text-[#555] hover:text-white'}`}
+            title="Schedule a message"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5">
+              <path fillRule="evenodd" d="M10 18a8 8 0 1 0 0-16 8 8 0 0 0 0 16Zm.75-13a.75.75 0 0 0-1.5 0v5c0 .414.336.75.75.75h4a.75.75 0 0 0 0-1.5h-3.25V5Z" clipRule="evenodd" />
+            </svg>
+          </button>
+          <button
             onClick={sendMessage}
             disabled={!input.trim() || sending || !cryptoKey || (roomSettings?.frozen === true && user?.uid !== roomOwnerUid)}
             className="text-[#007AFF] disabled:opacity-20 transition-all p-1 rounded-lg hover:bg-[#007AFF]/10 disabled:cursor-not-allowed"
@@ -1550,11 +1668,21 @@ export default function ChatScreen() {
           settings={roomSettings}
           tone={tone}
           inviteLink={inviteLink}
+          exporting={exporting}
           onToneChange={setToneAndSave}
           onSaveSettings={saveSettings}
           onRotateKey={rotateKey}
           onCreateInvite={createInvite}
+          onExport={exportChat}
           onClose={() => setShowSettings(false)}
+        />
+      )}
+
+      {showSearch && (
+        <SearchModal
+          roomCode={code || ''}
+          onJumpToMessage={(id) => { setShowSearch(false); scrollToMessage(id); }}
+          onClose={() => setShowSearch(false)}
         />
       )}
 
@@ -1981,10 +2109,12 @@ function SettingsModal({
   settings,
   tone,
   inviteLink,
+  exporting,
   onToneChange,
   onSaveSettings,
   onRotateKey,
   onCreateInvite,
+  onExport,
   onClose,
 }: {
   roomName: string;
@@ -1992,10 +2122,12 @@ function SettingsModal({
   settings: RoomSettings | null;
   tone: 'pop' | 'ding' | 'soft' | 'none';
   inviteLink: string;
+  exporting: boolean;
   onToneChange: (t: 'pop' | 'ding' | 'soft' | 'none') => void;
   onSaveSettings: (patch: Partial<RoomSettings>) => void;
   onRotateKey: () => void;
   onCreateInvite: () => void;
+  onExport: (format: 'json' | 'txt') => void;
   onClose: () => void;
 }) {
   const [slowMode, setSlowMode] = useState(settings?.slowModeSec || 0);
@@ -2151,6 +2283,29 @@ function SettingsModal({
                 Only the room owner can change room-level settings.
               </p>
             )}
+
+            <div>
+              <p className="text-[11px] text-[#555] font-medium uppercase tracking-wider mb-2">Export chat</p>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => onExport('json')}
+                  disabled={exporting}
+                  className="flex-1 py-2 rounded-lg text-xs font-medium border border-[#007AFF]/40 text-[#007AFF] bg-[#007AFF]/10 hover:bg-[#007AFF]/20 transition-all disabled:opacity-40"
+                >
+                  Export .json
+                </button>
+                <button
+                  onClick={() => onExport('txt')}
+                  disabled={exporting}
+                  className="flex-1 py-2 rounded-lg text-xs font-medium border border-[#00FF88]/40 text-[#00FF88] bg-[#00FF88]/10 hover:bg-[#00FF88]/20 transition-all disabled:opacity-40"
+                >
+                  Export .txt
+                </button>
+              </div>
+              <p className="text-[10px] text-[#555] mt-1">
+                {exporting ? 'Exporting and decrypting history...' : 'Downloads all messages, decrypted locally on your device.'}
+              </p>
+            </div>
           </div>
 
           <div className="flex gap-3 px-5 pb-5">
@@ -2248,6 +2403,7 @@ async function decryptMessage(data: any, id: string, keys: Record<number, Crypto
       type: parsed.type || 'text',
       file: parsed.file || undefined,
       replyTo: parsed.replyTo || undefined,
+      threadRootId: parsed.threadRootId || undefined,
       edited: data.edited || false,
       deleted: data.deleted || false,
       reactions: data.reactions || undefined,
@@ -2424,6 +2580,132 @@ function MentionDropdown({
   );
 }
 
+function SearchModal({
+  roomCode,
+  onJumpToMessage,
+  onClose,
+}: {
+  roomCode: string;
+  onJumpToMessage: (msgId: string) => void;
+  onClose: () => void;
+}) {
+  const [query, setQuery] = useState('');
+  const [results, setResults] = useState<SearchIndexEntry[]>([]);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const q = query.trim().toLowerCase();
+    if (!q) {
+      setResults([]);
+      setTotal(0);
+      return;
+    }
+    setLoading(true);
+    const t = setTimeout(async () => {
+      try {
+        const all = await localDB.searchIndex.where('roomCode').equals(roomCode).toArray();
+        if (cancelled) return;
+        const matches = all
+          .filter((m) => m.text.toLowerCase().includes(q))
+          .sort((a, b) => b.timestamp - a.timestamp);
+        setTotal(matches.length);
+        setResults(matches.slice(0, 50));
+      } catch {
+        if (!cancelled) setResults([]);
+      }
+      if (!cancelled) setLoading(false);
+    }, 250);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [query, roomCode]);
+
+  const highlight = (text: string, q: string) => {
+    const idx = text.toLowerCase().indexOf(q.toLowerCase());
+    if (idx === -1) return text;
+    const start = Math.max(0, idx - 25);
+    const end = Math.min(text.length, idx + q.length + 25);
+    const before = (start > 0 ? '…' : '') + text.slice(start, idx);
+    const match = text.slice(idx, idx + q.length);
+    const after = text.slice(idx + q.length, end) + (end < text.length ? '…' : '');
+    return (
+      <>
+        {before}
+        <mark className="bg-[#FF9F0A]/40 text-white rounded-sm">{match}</mark>
+        {after}
+      </>
+    );
+  };
+
+  return (
+    <>
+      <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm" onClick={onClose} />
+      <div className="fixed inset-0 z-50 flex flex-col max-w-md md:max-w-lg lg:max-w-xl mx-auto pointer-events-none">
+        <div className="flex-1" onClick={onClose} />
+        <div className="bg-[#1C1C1E] border border-[#333] border-b-0 rounded-t-2xl pointer-events-auto animate-fade-in flex flex-col max-h-[75vh]">
+          <div className="flex items-center gap-2 px-4 py-3 border-b border-[#333]">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 text-[#555] shrink-0">
+              <path fillRule="evenodd" d="M9 3.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11ZM2 9a7 7 0 1 1 12.452 4.391l3.328 3.329a.75.75 0 1 1-1.06 1.06l-3.329-3.328A7 7 0 0 1 2 9Z" clipRule="evenodd" />
+            </svg>
+            <input
+              ref={inputRef}
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search messages..."
+              className="flex-1 bg-transparent text-white placeholder-[#555] outline-none text-sm"
+            />
+            {loading && <span className="w-4 h-4 border-2 border-[#333] border-t-[#007AFF] rounded-full animate-spin shrink-0" />}
+            <button onClick={onClose} className="text-[#555] hover:text-white p-1.5 rounded-lg hover:bg-white/5 transition-all shrink-0">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4"><path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z" /></svg>
+            </button>
+          </div>
+          <div className="overflow-y-auto">
+            {query && results.length === 0 && !loading && (
+              <div className="px-4 py-8 text-center text-xs text-[#555]">
+                {total === 0 ? 'No matches found' : 'No results yet — messages are indexed as they load.'}
+              </div>
+            )}
+            {!query && (
+              <div className="px-4 py-8 text-center text-xs text-[#555]">
+                Messages are indexed locally on this device as they load.
+              </div>
+            )}
+            {results.map((r) => (
+              <button
+                key={r.msgId}
+                onClick={() => onJumpToMessage(r.msgId)}
+                className="w-full flex flex-col gap-0.5 px-4 py-2.5 text-left hover:bg-white/5 transition-colors border-b border-[#222]/60"
+              >
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] text-[#00FF88] font-medium">{r.senderName}</span>
+                  <span className="text-[9px] text-[#555]">{new Date(r.timestamp).toLocaleString()}</span>
+                </div>
+                <p className="text-xs text-[#ccc] truncate leading-snug">{highlight(r.text, query)}</p>
+              </button>
+            ))}
+            {total > 50 && (
+              <div className="px-4 py-3 text-center text-[10px] text-[#555]">
+                Showing first 50 of {total} matches
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
 const MessageItem = memo(function MessageItem({
   msg,
   isOwn,
@@ -2441,6 +2723,9 @@ const MessageItem = memo(function MessageItem({
   onReactingOpen,
   resolveName,
   prevSenderSame,
+  replyCount,
+  onJumpToMessage,
+  onJumpToThread,
 }: {
   msg: DecryptedMessage;
   isOwn: boolean;
@@ -2458,12 +2743,58 @@ const MessageItem = memo(function MessageItem({
   onReactingOpen: (id: string | null) => void;
   resolveName: (uid: string) => string;
   prevSenderSame?: boolean;
+  replyCount?: number;
+  onJumpToMessage: (id: string) => void;
+  onJumpToThread: (rootId: string) => void;
 }) {
   const [hoveredReaction, setHoveredReaction] = useState<string | null>(null);
+  const [swipeOffset, setSwipeOffset] = useState(0);
+  const [swipeOpen, setSwipeOpen] = useState(false);
+  const [dragging, setDragging] = useState(false);
+  const gestureRef = useRef({ startX: 0, startY: 0, active: false, locked: false });
   const isImage = msg.type === 'image';
   const isFile = msg.type === 'file';
   const isSys = msg.type === 'sys';
   const isPoll = msg.type === 'poll';
+
+  const closeSwipe = () => {
+    setSwipeOpen(false);
+    setSwipeOffset(0);
+  };
+
+  const onRowPointerDown = (e: React.PointerEvent) => {
+    if (e.pointerType === 'mouse') return;
+    gestureRef.current = { startX: e.clientX, startY: e.clientY, active: true, locked: false };
+  };
+
+  const onRowPointerMove = (e: React.PointerEvent) => {
+    const g = gestureRef.current;
+    if (!g.active) return;
+    const dx = e.clientX - g.startX;
+    const dy = e.clientY - g.startY;
+    if (!g.locked && Math.abs(dy) > Math.abs(dx)) {
+      g.locked = true;
+      return;
+    }
+    if (g.locked) return;
+    if (dx >= 0 && !swipeOpen) return;
+    setDragging(true);
+    const base = swipeOpen ? 84 : 0;
+    setSwipeOffset(Math.max(0, Math.min(84, base - dx)));
+  };
+
+  const onRowPointerUp = () => {
+    const g = gestureRef.current;
+    if (!g.active) return;
+    g.active = false;
+    setDragging(false);
+    if (!g.locked) {
+      setSwipeOpen(swipeOffset > 50);
+    }
+    setSwipeOffset(0);
+  };
+
+  const revealX = swipeOpen && !dragging ? 84 : swipeOffset;
 
   if (isSys) {
     const joined = msg.sys?.type === 'join';
@@ -2482,7 +2813,32 @@ const MessageItem = memo(function MessageItem({
   }
 
   return (
-    <div className={`flex flex-col ${isOwn ? 'items-end' : 'items-start'} ${prevSenderSame ? 'mt-0.5' : 'mt-2'}`}>
+    <div
+      className={`relative ${dragging ? 'select-none' : ''} ${prevSenderSame ? 'mt-0.5' : 'mt-2'}`}
+      style={{ touchAction: 'pan-y' }}
+      onPointerDown={onRowPointerDown}
+      onPointerMove={onRowPointerMove}
+      onPointerUp={onRowPointerUp}
+      onPointerLeave={onRowPointerUp}
+      onPointerCancel={onRowPointerUp}
+      onClick={() => { if (swipeOpen) closeSwipe(); }}
+    >
+      <button
+        onClick={(e) => { e.stopPropagation(); closeSwipe(); onReply(msg); }}
+        className={`absolute inset-y-0 right-0 w-[84px] flex items-center justify-center bg-[#00FF88]/15 border-l border-[#00FF88]/20 rounded-l-2xl transition-opacity ${swipeOpen || swipeOffset > 0 ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}
+        title="Reply"
+      >
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 text-[#00FF88]">
+          <path fillRule="evenodd" d="M3.43 2.524A41.29 41.29 0 0 1 10 2c2.236 0 4.43.18 6.57.524 1.437.231 2.43 1.49 2.43 2.902v5.148c0 1.413-.993 2.67-2.43 2.902a41.202 41.202 0 0 1-5.183.501.78.78 0 0 0-.528.224l-3.579 3.58A.75.75 0 0 1 6 17.25v-3.443a41.033 41.033 0 0 1-2.57-.33C1.993 13.244 1 11.986 1 10.573V5.426c0-1.413.993-2.67 2.43-2.902Z" clipRule="evenodd" />
+        </svg>
+      </button>
+      <div
+        className={`flex flex-col ${isOwn ? 'items-end' : 'items-start'}`}
+        style={{
+          transform: revealX ? `translateX(-${revealX}px)` : undefined,
+          transition: dragging ? 'none' : 'transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1)',
+        }}
+      >
       {msg.deleted ? (
         <div className="max-w-[80%] px-3.5 py-2.5 rounded-2xl text-sm bg-[#111] text-[#555] italic border border-[#222]">
           Message deleted
@@ -2502,9 +2858,11 @@ const MessageItem = memo(function MessageItem({
 
           {msg.replyTo && (
             <div
-              className={`text-xs px-3 py-1.5 rounded-xl border border-[#333]/50 max-w-full mb-0.5 ${
+              onClick={(e) => { e.stopPropagation(); onJumpToMessage(msg.replyTo!.messageId); }}
+              className={`text-xs px-3 py-1.5 rounded-xl border border-[#333]/50 max-w-full mb-0.5 cursor-pointer hover:border-[#555] transition-colors ${
                 isOwn ? 'rounded-br-sm bg-[#0055BB]/20' : 'rounded-bl-sm bg-[#222]'
               }`}
+              title="Jump to original message"
             >
               <span className="text-[#00FF88] text-[10px] font-medium">@{msg.replyTo.senderName}</span>
               <p className="text-[#777] text-[11px] truncate mt-0.5">{msg.replyTo.text}</p>
@@ -2732,8 +3090,21 @@ const MessageItem = memo(function MessageItem({
               )}
             </div>
           )}
+
+          {!msg.replyTo && replyCount && replyCount > 0 && (
+            <button
+              onClick={(e) => { e.stopPropagation(); onJumpToThread(msg.id); }}
+              className="mt-1 flex items-center gap-1 text-[10px] text-[#007AFF] hover:opacity-80 transition-opacity px-1"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3 h-3">
+                <path fillRule="evenodd" d="M3.43 2.524A41.29 41.29 0 0 1 10 2c2.236 0 4.43.18 6.57.524 1.437.231 2.43 1.49 2.43 2.902v5.148c0 1.413-.993 2.67-2.43 2.902a41.202 41.202 0 0 1-5.183.501.78.78 0 0 0-.528.224l-3.579 3.58A.75.75 0 0 1 6 17.25v-3.443a41.033 41.033 0 0 1-2.57-.33C1.993 13.244 1 11.986 1 10.573V5.426c0-1.413.993-2.67 2.43-2.902Z" clipRule="evenodd" />
+              </svg>
+              {replyCount} repl{replyCount === 1 ? 'y' : 'ies'}
+            </button>
+          )}
         </div>
       )}
+      </div>
     </div>
   );
 });
@@ -2742,6 +3113,18 @@ function formatFileSize(bytes: number): string {
   if (bytes < 1024) return bytes + ' B';
   if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
   return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+function downloadBlob(content: string, filename: string, mime: string) {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function fileToDataUrl(file: File): Promise<string> {
