@@ -2,6 +2,8 @@ interface AvatarProps {
   name: string;
   size?: 'xs' | 'sm' | 'md' | 'lg';
   className?: string;
+  emoji?: string;
+  color?: string;
 }
 
 export function getInitials(name: string): string {
@@ -31,15 +33,15 @@ const sizeMap = {
   lg: 'w-10 h-10 text-sm',
 };
 
-export default function Avatar({ name, size = 'md', className = '' }: AvatarProps) {
+export default function Avatar({ name, size = 'md', className = '', emoji, color }: AvatarProps) {
   const safe = name || '?';
   return (
     <div
       className={`rounded-full flex items-center justify-center font-bold shrink-0 ${sizeMap[size]} ${className}`}
-      style={{ backgroundColor: hashColor(safe) }}
+      style={{ backgroundColor: color || hashColor(safe) }}
       title={safe}
     >
-      {getInitials(safe)}
+      {emoji || getInitials(safe)}
     </div>
   );
 }

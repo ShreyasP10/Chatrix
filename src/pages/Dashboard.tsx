@@ -12,6 +12,7 @@ import {
   getDocs,
   serverTimestamp,
   onSnapshot,
+  where,
 } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { localDB } from '../lib/db';
@@ -41,12 +42,14 @@ export default function Dashboard() {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [createName, setCreateName] = useState('');
   const [createType, setCreateType] = useState<'permanent' | 'auto'>('permanent');
+  const [showAvatarPicker, setShowAvatarPicker] = useState(false);
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const { user, setUser, joinedRooms, setJoinedRooms, addJoinedRoom, removeJoinedRoom } = useStore();
   const { showPrompt, install } = useInstallPrompt();
   const nameInputRef = useRef<HTMLInputElement>(null);
   const createInputRef = useRef<HTMLInputElement>(null);
+  const restoreInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (searchParams.get('new') === '1') {
@@ -280,6 +283,67 @@ export default function Dashboard() {
     setEditingName(false);
   };
 
+  const saveAvatar = async (emoji: string, color: string) => {
+    if (!user) return;
+    const updated = { ...user, avatarEmoji: emoji || undefined, avatarColor: color || undefined };
+    setUser(updated);
+    await localDB.userProfile.put(updated);
+    try {
+      await updateDoc(doc(db, 'users', user.uid), { avatarEmoji: emoji || '', avatarColor: color || '' });
+    } catch {}
+  };
+
+  const backupData = () => {
+    const payload = {
+      app: 'chatrix',
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      rooms: useStore.getState().joinedRooms,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `chatrix-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
+  const handleRestoreFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (e.target) e.target.value = '';
+    if (!file || !user) return;
+    try {
+      const parsed = JSON.parse(await file.text());
+      if (parsed.app !== 'chatrix' || !Array.isArray(parsed.rooms)) {
+        setError('Invalid backup file');
+        return;
+      }
+      let restored = 0;
+      for (const r of parsed.rooms) {
+        if (!r.code || typeof r.code !== 'string') continue;
+        await setDoc(doc(db, 'rooms', r.code), { name: r.name || `Room ${r.code}`, createdAt: serverTimestamp(), createdBy: user.uid }, { merge: true });
+        await setDoc(doc(db, 'rooms', r.code, 'members', user.uid), { joinedAt: serverTimestamp(), name: user.name }, { merge: true });
+        const room: JoinedRoom = {
+          code: r.code,
+          name: r.name || `Room ${r.code}`,
+          joinedAt: r.joinedAt || Date.now(),
+          lastReadTimestamp: r.lastReadTimestamp ?? null,
+        };
+        await localDB.joinedRooms.put(room);
+        addJoinedRoom(room);
+        restored++;
+      }
+      const allRooms = [...useStore.getState().joinedRooms.map((x) => x.code), ...parsed.rooms.map((r: any) => r.code)];
+      swSend({ type: 'WATCH_ROOMS', rooms: Array.from(new Set(allRooms)) });
+      setError(restored > 0 ? `Restored ${restored} room${restored !== 1 ? 's' : ''}` : 'No rooms found in backup');
+    } catch {
+      setError('Could not read backup file');
+    }
+  };
+
   const getLastMessage = useCallback(async (roomCode: string) => {
     try {
       const q = query(
@@ -309,10 +373,16 @@ export default function Dashboard() {
     <div className="flex flex-col items-center min-h-dvh px-4 py-8 max-w-md md:max-w-lg lg:max-w-xl mx-auto">
       {user && (
         <div className="flex items-center gap-3 mb-6 self-start w-full animate-fade-in group">
-          <div className="relative">
-            <Avatar name={user.name} size="lg" />
+          <button onClick={() => setShowAvatarPicker(true)} className="relative shrink-0" title="Customize avatar">
+            <Avatar name={user.name} size="lg" emoji={user.avatarEmoji} color={user.avatarColor} />
             <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 bg-[#00FF88] rounded-full border-2 border-black" />
-          </div>
+            <div className="absolute inset-0 rounded-full bg-black/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 text-white">
+                <path d="m5.433 13.917 1.262-3.155A4 4 0 0 1 7.58 9.42l6.92-6.918a2.121 2.121 0 0 1 3 3l-6.92 6.918c-.383.383-.84.685-1.343.886l-3.154 1.262a.5.5 0 0 1-.65-.65Z" />
+                <path d="M3.5 5.75c0-.69.56-1.25 1.25-1.25H10A.75.75 0 0 0 10 3H4.75A2.75 2.75 0 0 0 2 5.75v9.5A2.75 2.75 0 0 0 4.75 18h9.5A2.75 2.75 0 0 0 17 15.25V10a.75.75 0 0 0-1.5 0v5.25c0 .69-.56 1.25-1.25 1.25h-9.5c-.69 0-1.25-.56-1.25-1.25v-9.5Z" />
+              </svg>
+            </div>
+          </button>
           <div className="flex-1 min-w-0">
             {editingName ? (
               <div className="flex items-center gap-2">
@@ -342,7 +412,43 @@ export default function Dashboard() {
             )}
             <p className="text-xs text-[#555]">Chatrix</p>
           </div>
+          <button
+            onClick={backupData}
+            className="text-[#444] hover:text-[#007AFF] p-1.5 rounded-lg hover:bg-white/5 transition-all shrink-0"
+            title="Backup rooms (download)"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+              <path d="M10.75 2.75a.75.75 0 0 0-1.5 0v8.614L6.295 8.235a.75.75 0 1 0-1.09 1.03l4.25 4.5a.75.75 0 0 0 1.09 0l4.25-4.5a.75.75 0 0 0-1.09-1.03l-2.955 3.129V2.75Z" />
+              <path d="M3.5 12.75a.75.75 0 0 0-1.5 0v2.5A2.75 2.75 0 0 0 4.75 18h10.5A2.75 2.75 0 0 0 18 15.25v-2.5a.75.75 0 0 0-1.5 0v2.5c0 .69-.56 1.25-1.25 1.25H4.75c-.69 0-1.25-.56-1.25-1.25v-2.5Z" />
+            </svg>
+          </button>
+          <button
+            onClick={() => restoreInputRef.current?.click()}
+            className="text-[#444] hover:text-[#007AFF] p-1.5 rounded-lg hover:bg-white/5 transition-all shrink-0"
+            title="Restore rooms (upload backup)"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+              <path d="M9.25 13.25a.75.75 0 0 0 1.5 0V4.636l2.955 3.129a.75.75 0 0 0 1.09-1.03l-4.25-4.5a.75.75 0 0 0-1.09 0l-4.25 4.5a.75.75 0 1 0 1.09 1.03l2.955-3.13v8.615Z" />
+              <path d="M3.5 12.75a.75.75 0 0 0-1.5 0v2.5A2.75 2.75 0 0 0 4.75 18h10.5A2.75 2.75 0 0 0 18 15.25v-2.5a.75.75 0 0 0-1.5 0v2.5c0 .69-.56 1.25-1.25 1.25H4.75c-.69 0-1.25-.56-1.25-1.25v-2.5Z" />
+            </svg>
+          </button>
+          <input
+            ref={restoreInputRef}
+            type="file"
+            accept=".json,application/json"
+            className="hidden"
+            onChange={handleRestoreFile}
+          />
         </div>
+      )}
+
+      {showAvatarPicker && user && (
+        <AvatarPickerModal
+          current={{ emoji: user.avatarEmoji, color: user.avatarColor }}
+          onSave={(emoji, color) => { saveAvatar(emoji, color); setShowAvatarPicker(false); }}
+          onClear={() => { saveAvatar('', ''); setShowAvatarPicker(false); }}
+          onClose={() => setShowAvatarPicker(false)}
+        />
       )}
 
       <div className="w-full text-center mb-8 animate-fade-in">
@@ -544,6 +650,96 @@ export default function Dashboard() {
   );
 }
 
+function AvatarPickerModal({
+  current,
+  onSave,
+  onClear,
+  onClose,
+}: {
+  current: { emoji?: string; color?: string };
+  onSave: (emoji: string, color: string) => void;
+  onClear: () => void;
+  onClose: () => void;
+}) {
+  const [emoji, setEmoji] = useState(current.emoji || '');
+  const [color, setColor] = useState(current.color || '');
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  const EMOJIS = ['🦊','🐼','🐸','🦁','🐯','🐨','🐙','🦄','🐳','🦋','🐝','🦉','🐢','🐹','🦖','🐲','👽','🤖','👻','😎','🤠','🥷','🧙','🐱'];
+  const COLORS = ['#007AFF','#5856D6','#AF52DE','#FF2D55','#FF3B30','#FF9500','#FFCC00','#34C759','#00FF88','#30B0C7','#8E8E93','#A2845E'];
+
+  return (
+    <>
+      <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm" onClick={onClose} />
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-6 pointer-events-none">
+        <div
+          className="bg-[#1C1C1E] border border-[#333] rounded-2xl w-full max-w-sm shadow-2xl pointer-events-auto animate-fade-in"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="flex items-center justify-between px-5 py-4 border-b border-[#333]">
+            <h2 className="text-sm font-semibold text-white">Customize avatar</h2>
+            <button onClick={onClose} className="text-[#555] hover:text-white p-1.5 rounded-lg hover:bg-white/5 transition-all">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4"><path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z" /></svg>
+            </button>
+          </div>
+          <div className="px-5 py-4">
+            <div className="flex items-center gap-4 mb-4">
+              <div className="w-14 h-14 rounded-full flex items-center justify-center text-xl border-2 border-[#333]" style={{ backgroundColor: color || '#333' }}>
+                {emoji || <span className="text-[#777] text-sm font-bold">{'?'}</span>}
+              </div>
+              <p className="text-xs text-[#555]">Pick an emoji and a color — shown to others in chat.</p>
+            </div>
+            <p className="text-[11px] text-[#555] font-medium uppercase tracking-wider mb-2">Emoji</p>
+            <div className="grid grid-cols-8 gap-1.5 mb-4">
+              {EMOJIS.map((e) => (
+                <button
+                  key={e}
+                  onClick={() => setEmoji(e)}
+                  className={`text-lg p-1 rounded-lg transition-all ${emoji === e ? 'bg-[#007AFF]/20 ring-1 ring-[#007AFF]' : 'hover:bg-white/5'}`}
+                >
+                  {e}
+                </button>
+              ))}
+            </div>
+            <p className="text-[11px] text-[#555] font-medium uppercase tracking-wider mb-2">Color</p>
+            <div className="flex flex-wrap gap-2 mb-5">
+              {COLORS.map((c) => (
+                <button
+                  key={c}
+                  onClick={() => setColor(c)}
+                  className={`w-7 h-7 rounded-full transition-all ${color === c ? 'ring-2 ring-white scale-110' : 'hover:scale-110'}`}
+                  style={{ backgroundColor: c }}
+                />
+              ))}
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={onClear}
+                className="px-3 py-2 rounded-xl text-xs font-medium text-[#555] border border-[#333] hover:text-white hover:border-[#555] transition-all"
+              >
+                Reset
+              </button>
+              <button
+                onClick={() => onSave(emoji, color)}
+                className="flex-1 py-2.5 rounded-xl text-sm font-medium bg-[#007AFF] text-white hover:bg-[#0066CC] transition-all"
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
 function RoomItem({
   room,
   onEnter,
@@ -558,6 +754,7 @@ function RoomItem({
   const [preview, setPreview] = useState<{ text: string; timestamp: number; senderUid: string; senderName: string } | null>(null);
   const [memberCount, setMemberCount] = useState<number | null>(null);
   const [showDelete, setShowDelete] = useState(false);
+  const [unread, setUnread] = useState(0);
 
   const [roomName, setRoomName] = useState(room.name || '');
 
@@ -565,6 +762,17 @@ function RoomItem({
 
   const pressTimerRef = useRef<number | null>(null);
   const longPressedRef = useRef(false);
+
+  useEffect(() => {
+    if (!room.lastReadTimestamp) { setUnread(0); return; }
+    const q = query(
+      collection(db, 'rooms', room.code, 'messages'),
+      where('timestamp', '>', new Date(room.lastReadTimestamp)),
+      limit(200)
+    );
+    const unsub = onSnapshot(q, (snap) => setUnread(snap.size));
+    return unsub;
+  }, [room.code, room.lastReadTimestamp]);
 
   const startPress = () => {
     longPressedRef.current = false;
@@ -704,6 +912,11 @@ function RoomItem({
         </p>
       </div>
       <div className="flex items-center gap-1">
+        {unread > 0 && (
+          <span className="min-w-5 h-5 px-1.5 rounded-full bg-[#007AFF] text-white text-[10px] font-bold flex items-center justify-center shrink-0">
+            {unread >= 200 ? '200+' : unread}
+          </span>
+        )}
         <button
           onClick={(e) => { e.stopPropagation(); onDelete(); }}
           className={`text-[#333] hover:text-red-400 p-1 rounded-lg hover:bg-red-400/5 transition-all ${showDelete ? 'opacity-100' : 'opacity-0 md:group-hover:opacity-100'}`}

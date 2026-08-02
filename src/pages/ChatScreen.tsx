@@ -71,7 +71,7 @@ export default function ChatScreen() {
   const [roomName, setRoomName] = useState('');
   const [editingRoomName, setEditingRoomName] = useState(false);
   const [roomNameInput, setRoomNameInput] = useState('');
-  const [memberList, setMemberList] = useState<{ name: string; uid: string; online?: boolean; lastSeen?: number; lastSpokeAt?: number | null }[]>([]);
+  const [memberList, setMemberList] = useState<{ name: string; uid: string; online?: boolean; lastSeen?: number; lastSpokeAt?: number | null; avatarEmoji?: string; avatarColor?: string }[]>([]);
 
   const [memberSearch, setMemberSearch] = useState('');
   const [roomOwnerUid, setRoomOwnerUid] = useState<string | null>(null);
@@ -107,6 +107,8 @@ export default function ChatScreen() {
   userRef.current = user;
   const toneRef = useRef(tone);
   toneRef.current = tone;
+  const roomNameRef = useRef(roomName);
+  roomNameRef.current = roomName;
 
   const cryptoKey = keys[roomKeyVersion] ?? null;
 
@@ -172,6 +174,8 @@ export default function ChatScreen() {
         setRoomSettings({
           slowModeSec: data.slowModeSec || 0,
           blockedWords: data.blockedWords || [],
+          blurWords: data.blurWords || [],
+          effectWords: data.effectWords || [],
           frozen: data.frozen === true,
           keyVersion: typeof data.keyVersion === 'number' ? data.keyVersion : 0,
           autoDelete: data.autoDelete === true,
@@ -212,7 +216,7 @@ export default function ChatScreen() {
     const q = query(collection(db, 'rooms', code, 'members'));
     const unsub = onSnapshot(q, (snap) => {
       const map: Record<string, string> = {};
-      const list: { uid: string; name: string; online: boolean; lastSeen: number; lastSpokeAt: number | null }[] = [];
+      const list: { uid: string; name: string; online: boolean; lastSeen: number; lastSpokeAt: number | null; avatarEmoji?: string; avatarColor?: string }[] = [];
       let onlineCount = 0;
       let count = 0;
       const now = Date.now();
@@ -231,6 +235,8 @@ export default function ChatScreen() {
             online: isOnline,
             lastSeen,
             lastSpokeAt: data.lastSpokeAt?.toMillis?.() ?? null,
+            avatarEmoji: data.avatarEmoji || undefined,
+            avatarColor: data.avatarColor || undefined,
           });
           if (isOnline) onlineCount++;
           count++;
@@ -301,7 +307,13 @@ export default function ChatScreen() {
     const setOnline = () => {
       setDoc(
         memberRef,
-        { online: true, name: user.name, lastSeen: serverTimestamp() },
+        {
+          online: true,
+          name: user.name,
+          lastSeen: serverTimestamp(),
+          avatarEmoji: user.avatarEmoji || '',
+          avatarColor: user.avatarColor || '',
+        },
         { merge: true }
       ).catch(() => {});
     };
@@ -422,6 +434,15 @@ export default function ChatScreen() {
                 }).catch(() => {});
               }
               if (seq > lastReadSeqRef.current) lastReadSeqRef.current = seq;
+
+              // Mention / reply notifications (in-app)
+              if (d.mentionedUids?.includes(userRef.current.uid)) {
+                showToast(`@${d.senderName || 'Someone'} mentioned you`);
+                playIncomingFeedback(toneRef.current);
+              } else if (d.replyToUid === userRef.current.uid) {
+                showToast(`${d.senderName || 'Someone'} replied to you`);
+                playIncomingFeedback(toneRef.current);
+              }
             }
           }
 
@@ -438,6 +459,19 @@ export default function ChatScreen() {
             merged.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
             return merged;
           });
+        }
+        // Mark room as read (updates unread badges on dashboard)
+        if (userRef.current) {
+          const now = Date.now();
+          localDB.joinedRooms.get(code).then((local) => {
+            localDB.joinedRooms.put({
+              ...(local || { code, name: roomNameRef.current, joinedAt: now, lastReadTimestamp: null }),
+              lastReadTimestamp: now,
+            });
+            useStore.getState().setJoinedRooms(
+              useStore.getState().joinedRooms.map((r) => r.code === code ? { ...r, lastReadTimestamp: now } : r)
+            );
+          }).catch(() => {});
         }
       },
       () => setLoading(false)
@@ -742,6 +776,8 @@ export default function ChatScreen() {
       await updateDoc(doc(db, 'rooms', code), {
         slowModeSec: next.slowModeSec || 0,
         blockedWords: next.blockedWords || [],
+        blurWords: next.blurWords || [],
+        effectWords: next.effectWords || [],
         frozen: next.frozen === true,
         keyVersion: next.keyVersion ?? 0,
       });
@@ -1328,6 +1364,14 @@ export default function ChatScreen() {
               onMenuOpen={setMenuMsgId}
               onReactingOpen={setReactingMsgId}
               resolveName={(uid) => memberList.find((m) => m.uid === uid)?.name || uid.slice(0, 6)}
+              avatarFor={(uid) => {
+                const m = memberList.find((x) => x.uid === uid);
+                return m ? { emoji: m.avatarEmoji, color: m.avatarColor } : undefined;
+              }}
+              blurWords={roomSettings?.blurWords}
+              hasEffect={Boolean(
+                roomSettings?.effectWords?.some((w) => w && new RegExp(`(^|[^a-z0-9])${w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([^a-z0-9]|$)`).test(msg.text.toLowerCase()))
+              )}
               prevSenderSame={i > 0 && messages[i - 1].senderUid === msg.senderUid}
               replyCount={replyCount}
               onJumpToMessage={scrollToMessage}
@@ -1728,7 +1772,7 @@ function MembersModal({
   onClose,
 }: {
   memberCount: number | null;
-  memberList: { name: string; uid: string; online?: boolean; lastSeen?: number; lastSpokeAt?: number | null }[];
+  memberList: { name: string; uid: string; online?: boolean; lastSeen?: number; lastSpokeAt?: number | null; avatarEmoji?: string; avatarColor?: string }[];
   fingerprint: string;
   search: string;
   onSearchChange: (v: string) => void;
@@ -1908,13 +1952,13 @@ function MembersModal({
                   <div key={m.uid} className="flex items-center gap-3 px-3 py-2.5 rounded-xl hover:bg-white/[0.03] transition-colors">
                     <div className="relative shrink-0">
                       <div
-                        className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold border-2 text-white"
+                        className="w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold border-2 text-white"
                         style={{
-                          background: 'linear-gradient(135deg, rgba(0,122,255,0.35), rgba(88,86,214,0.35))',
+                          backgroundColor: m.avatarColor || 'rgba(0,122,255,0.35)',
                           borderColor: m.online ? '#00FF88' : activityColor(m.lastSeen),
                         }}
                       >
-                        {(m.name || '?').charAt(0).toUpperCase()}
+                        {m.avatarEmoji || (m.name || '?').charAt(0).toUpperCase()}
                       </div>
                     </div>
                     <div className="flex-1 min-w-0">
@@ -2132,10 +2176,14 @@ function SettingsModal({
 }) {
   const [slowMode, setSlowMode] = useState(settings?.slowModeSec || 0);
   const [wordsInput, setWordsInput] = useState((settings?.blockedWords || []).join(', '));
+  const [blurInput, setBlurInput] = useState((settings?.blurWords || []).join(', '));
+  const [effectInput, setEffectInput] = useState((settings?.effectWords || []).join(', '));
 
   useEffect(() => {
     setSlowMode(settings?.slowModeSec || 0);
     setWordsInput((settings?.blockedWords || []).join(', '));
+    setBlurInput((settings?.blurWords || []).join(', '));
+    setEffectInput((settings?.effectWords || []).join(', '));
   }, [settings]);
 
   useEffect(() => {
@@ -2148,7 +2196,9 @@ function SettingsModal({
 
   const save = () => {
     const words = wordsInput.split(',').map((w) => w.trim().toLowerCase()).filter(Boolean);
-    onSaveSettings({ slowModeSec: slowMode, blockedWords: words });
+    const blurWords = blurInput.split(',').map((w) => w.trim().toLowerCase()).filter(Boolean);
+    const effectWords = effectInput.split(',').map((w) => w.trim().toLowerCase()).filter(Boolean);
+    onSaveSettings({ slowModeSec: slowMode, blockedWords: words, blurWords, effectWords });
   };
 
   const TONES: { id: 'pop' | 'ding' | 'soft' | 'none'; label: string }[] = [
@@ -2228,6 +2278,30 @@ function SettingsModal({
                     className="w-full bg-[#0D0D0D] text-white text-sm rounded-lg px-3 py-2 outline-none border border-[#333] focus:border-[#555] placeholder-[#555]"
                   />
                   <p className="text-[10px] text-[#555] mt-1">Comma-separated. Messages containing these are blocked.</p>
+                </div>
+
+                <div>
+                  <p className="text-[11px] text-[#555] font-medium uppercase tracking-wider mb-2">Blur words</p>
+                  <input
+                    type="text"
+                    value={blurInput}
+                    onChange={(e) => setBlurInput(e.target.value)}
+                    placeholder="e.g. secret, password, code"
+                    className="w-full bg-[#0D0D0D] text-white text-sm rounded-lg px-3 py-2 outline-none border border-[#333] focus:border-[#555] placeholder-[#555]"
+                  />
+                  <p className="text-[10px] text-[#555] mt-1">Comma-separated. Matches are masked with * until tapped.</p>
+                </div>
+
+                <div>
+                  <p className="text-[11px] text-[#555] font-medium uppercase tracking-wider mb-2">Effect words</p>
+                  <input
+                    type="text"
+                    value={effectInput}
+                    onChange={(e) => setEffectInput(e.target.value)}
+                    placeholder="e.g. yay, congrats, party"
+                    className="w-full bg-[#0D0D0D] text-white text-sm rounded-lg px-3 py-2 outline-none border border-[#333] focus:border-[#555] placeholder-[#555]"
+                  />
+                  <p className="text-[10px] text-[#555] mt-1">Comma-separated. Triggers a burst animation when sent.</p>
                 </div>
 
                 <div className="flex items-center justify-between">
@@ -2344,17 +2418,88 @@ function parseMentions(text: string, nameMap: Record<string, string>): string[] 
   return uids;
 }
 
-function MentionText({ text }: { text: string }) {
-  const parts = text.split(/(@\w+)/g);
-  return (
-    <>
-      {parts.map((part, i) =>
-        /^@\w+$/.test(part)
-          ? <span key={i} className="text-[#00FF88] font-medium">{part}</span>
-          : part
-      )}
-    </>
-  );
+function RichText({
+  text,
+  blurWords,
+  revealed,
+  onToggleReveal,
+}: {
+  text: string;
+  blurWords?: string[];
+  revealed: Set<string>;
+  onToggleReveal: (w: string) => void;
+}) {
+  const parts: React.ReactNode[] = [];
+  let key = 0;
+
+  const pushPlain = (s: string) => {
+    if (!s) return;
+    if (!blurWords || blurWords.length === 0) {
+      parts.push(s);
+      return;
+    }
+    const wordRe = /([A-Za-z0-9_]+)/g;
+    let wm: RegExpExecArray | null;
+    let wLast = 0;
+    while ((wm = wordRe.exec(s))) {
+      if (wm.index > wLast) parts.push(s.slice(wLast, wm.index));
+      const word = wm[1];
+      const lower = word.toLowerCase();
+      const hit = blurWords.find((b) => b && lower.includes(b));
+      if (hit) {
+        if (revealed.has(hit)) {
+          parts.push(
+            <span key={`r${key++}`} className="rounded bg-yellow-400/20 px-0.5">{word}</span>
+          );
+        } else {
+          const mask =
+            word.length <= 2
+              ? '•'.repeat(word.length)
+              : word.charAt(0) + '•'.repeat(word.length - 2) + word.charAt(word.length - 1);
+          parts.push(
+            <span
+              key={`b${key++}`}
+              className="cursor-pointer rounded px-0.5 select-none hover:bg-white/10"
+              title={`Blurred word — tap to reveal: ${hit}`}
+              onClick={() => onToggleReveal(hit)}
+            >
+              {mask}
+            </span>
+          );
+        }
+      } else {
+        parts.push(word);
+      }
+      wLast = wm.index + word.length;
+    }
+    parts.push(s.slice(wLast));
+  };
+
+  const regex = /(@[\w\u{4e00}-\u{9fff}]{1,20})|(https?:\/\/[^\s]+)/gu;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = regex.exec(text))) {
+    pushPlain(text.slice(last, m.index));
+    if (m[1]) {
+      parts.push(<span key={`m${key++}`} className="text-[#00FF88] font-medium">{m[1]}</span>);
+    } else if (m[2]) {
+      parts.push(
+        <a
+          key={`l${key++}`}
+          href={m[2]}
+          target="_blank"
+          rel="noopener noreferrer"
+          onClick={(e) => e.stopPropagation()}
+          className="text-[#00CFFF] underline decoration-dotted underline-offset-2 break-all"
+        >
+          {m[2]}
+        </a>
+      );
+    }
+    last = m.index + m[0].length;
+  }
+  pushPlain(text.slice(last));
+  return <>{parts}</>;
 }
 
 async function decryptMessage(data: any, id: string, keys: Record<number, CryptoKey>): Promise<DecryptedMessage> {
@@ -2722,10 +2867,13 @@ const MessageItem = memo(function MessageItem({
   onMenuOpen,
   onReactingOpen,
   resolveName,
+  avatarFor,
   prevSenderSame,
   replyCount,
   onJumpToMessage,
   onJumpToThread,
+  blurWords,
+  hasEffect,
 }: {
   msg: DecryptedMessage;
   isOwn: boolean;
@@ -2742,20 +2890,40 @@ const MessageItem = memo(function MessageItem({
   onMenuOpen: (id: string | null) => void;
   onReactingOpen: (id: string | null) => void;
   resolveName: (uid: string) => string;
+  avatarFor: (uid: string) => { emoji?: string; color?: string } | undefined;
   prevSenderSame?: boolean;
   replyCount?: number;
   onJumpToMessage: (id: string) => void;
   onJumpToThread: (rootId: string) => void;
+  blurWords?: string[];
+  hasEffect?: boolean;
 }) {
   const [hoveredReaction, setHoveredReaction] = useState<string | null>(null);
+  const [revealedWords, setRevealedWords] = useState<Set<string>>(new Set());
   const [swipeOffset, setSwipeOffset] = useState(0);
   const [swipeOpen, setSwipeOpen] = useState(false);
   const [dragging, setDragging] = useState(false);
   const gestureRef = useRef({ startX: 0, startY: 0, active: false, locked: false });
+  const longPressTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const movedRef = useRef(false);
   const isImage = msg.type === 'image';
   const isFile = msg.type === 'file';
   const isSys = msg.type === 'sys';
   const isPoll = msg.type === 'poll';
+  const myAvatar = avatarFor(msg.senderUid);
+  const linkPreview = msg.type === 'text' && msg.text ? (msg.text.match(/https?:\/\/[^\s]+/)?.[0] || null) : null;
+
+  useEffect(() => {
+    return () => {
+      if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
+    };
+  }, []);
+
+  const copyMessage = async () => {
+    try {
+      await navigator.clipboard.writeText(msg.text);
+    } catch {}
+  };
 
   const closeSwipe = () => {
     setSwipeOpen(false);
@@ -2765,6 +2933,13 @@ const MessageItem = memo(function MessageItem({
   const onRowPointerDown = (e: React.PointerEvent) => {
     if (e.pointerType === 'mouse') return;
     gestureRef.current = { startX: e.clientX, startY: e.clientY, active: true, locked: false };
+    movedRef.current = false;
+    if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
+    longPressTimerRef.current = setTimeout(() => {
+      if (!movedRef.current && !swipeOpen) {
+        onMenuOpen(msg.id);
+      }
+    }, 450);
   };
 
   const onRowPointerMove = (e: React.PointerEvent) => {
@@ -2772,6 +2947,7 @@ const MessageItem = memo(function MessageItem({
     if (!g.active) return;
     const dx = e.clientX - g.startX;
     const dy = e.clientY - g.startY;
+    if (Math.abs(dx) > 10 || Math.abs(dy) > 10) movedRef.current = true;
     if (!g.locked && Math.abs(dy) > Math.abs(dx)) {
       g.locked = true;
       return;
@@ -2788,6 +2964,10 @@ const MessageItem = memo(function MessageItem({
     if (!g.active) return;
     g.active = false;
     setDragging(false);
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
     if (!g.locked) {
       setSwipeOpen(swipeOffset > 50);
     }
@@ -2848,7 +3028,7 @@ const MessageItem = memo(function MessageItem({
           {/* Sender info — only when sender changes */}
           {!prevSenderSame && !isPoll && (
           <div className={`flex items-center gap-1.5 mb-0.5 ${isOwn ? 'flex-row-reverse' : 'flex-row'}`}>
-            {!isOwn && <Avatar name={msg.senderName} size="sm" />}
+            {!isOwn && <Avatar name={msg.senderName} size="sm" emoji={myAvatar?.emoji} color={myAvatar?.color} />}
             <span className="text-[11px] text-[#555] font-medium">{msg.senderName}</span>
             <span className="text-[9px] text-[#333]" title={formatFullDate(msg.timestamp)}>{formatMessageTime(msg.timestamp)}</span>
             {msg.edited && <span className="text-[9px] text-[#444]">edited</span>}
@@ -2876,7 +3056,7 @@ const MessageItem = memo(function MessageItem({
                 {msg.burn && <span className="text-[10px] text-[#FF453A] shrink-0" title="Burns 30s after sending">🔥</span>}
               </div>
               <div className="flex items-center gap-2 mb-3">
-                {!isOwn && <Avatar name={msg.senderName} size="xs" />}
+                {!isOwn && <Avatar name={msg.senderName} size="xs" emoji={myAvatar?.emoji} color={myAvatar?.color} />}
                 <span className="text-[11px] text-[#555]">{msg.senderName}</span>
                 <span className="text-[9px] text-[#444]" title={formatFullDate(msg.timestamp)}>{formatMessageTime(msg.timestamp)}</span>
               </div>
@@ -2966,7 +3146,63 @@ const MessageItem = memo(function MessageItem({
                     : 'bg-[#1C1C1E] text-[#E5E5E5] rounded-bl-sm border border-[#2A2A2A]'
                 }`}
               >
-                <MentionText text={msg.text} />
+                <RichText
+                  text={msg.text}
+                  blurWords={blurWords}
+                  revealed={revealedWords}
+                  onToggleReveal={(w) => {
+                    setRevealedWords((prev) => {
+                      const next = new Set(prev);
+                      if (next.has(w)) next.delete(w);
+                      else next.add(w);
+                      return next;
+                    });
+                  }}
+                />
+              </div>
+            )}
+
+            {linkPreview && (
+              <a
+                href={linkPreview}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={(e) => e.stopPropagation()}
+                className="mt-1 flex items-center gap-2.5 rounded-xl border border-[#333] bg-black/30 px-3 py-2 hover:bg-black/50 transition-colors max-w-full"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className={`w-4 h-4 shrink-0 ${isOwn ? 'text-white/70' : 'text-[#666]'}`}>
+                  <path d="M12.232 4.232a2.5 2.5 0 0 1 3.536 3.536l-1.225 1.224a.75.75 0 0 0 1.061 1.06l1.224-1.224a4 4 0 0 0-5.656-5.656l-3 3a4 4 0 0 0 .225 5.865.75.75 0 0 0 .977-1.138 2.5 2.5 0 0 1-.142-3.667l3-3Z" />
+                  <path d="M11.603 7.963a.75.75 0 0 0-.977 1.138 2.5 2.5 0 0 1 .142 3.667l-3 3a2.5 2.5 0 0 1-3.536-3.536l1.225-1.224a.75.75 0 0 0-1.061-1.06l-1.224 1.224a4 4 0 1 0 5.656 5.656l3-3a4 4 0 0 0-.225-5.865Z" />
+                </svg>
+                <span className="flex-1 min-w-0">
+                  <span className={`block text-xs font-medium truncate ${isOwn ? 'text-white/90' : 'text-[#ccc]'}`}>
+                    {(() => { try { return new URL(linkPreview).hostname; } catch { return linkPreview; } })()}
+                  </span>
+                  <span className={`block text-[11px] truncate ${isOwn ? 'text-white/60' : 'text-[#666]'}`}>{linkPreview}</span>
+                </span>
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className={`w-4 h-4 shrink-0 ${isOwn ? 'text-white/60' : 'text-[#555]'}`}>
+                  <path fillRule="evenodd" d="M4.25 5.5a.75.75 0 0 0-.75.75v8.5c0 .414.336.75.75.75h8.5a.75.75 0 0 0 .75-.75v-4a.75.75 0 0 1 1.5 0v4A2.25 2.25 0 0 1 12.75 17h-8.5A2.25 2.25 0 0 1 2 14.75v-8.5A2.25 2.25 0 0 1 4.25 4h5a.75.75 0 0 1 0 1.5h-5Z" clipRule="evenodd" />
+                  <path fillRule="evenodd" d="M6.194 12.753a.75.75 0 0 0 1.06.053L16.5 4.44v2.81a.75.75 0 0 0 1.5 0v-4.5a.75.75 0 0 0-.75-.75h-4.5a.75.75 0 0 0 0 1.5h2.553l-9.056 8.194a.75.75 0 0 0-.053 1.06Z" clipRule="evenodd" />
+                </svg>
+              </a>
+            )}
+
+            {hasEffect && (
+              <div className="pointer-events-none absolute -top-3 left-1/2 -translate-x-1/2 z-10">
+                {['🎉', '✨', '💖', '🎊', '⭐', '🎈'].map((e, i) => (
+                  <span
+                    key={i}
+                    className="absolute text-sm animate-burst"
+                    style={{
+                      left: `${(i - 2.5) * 14}px`,
+                      ['--dx' as any]: `${(i - 2.5) * 55}px`,
+                      ['--dy' as any]: `-${55 + (i % 3) * 15}px`,
+                      animationDelay: `${i * 90}ms`,
+                    }}
+                  >
+                    {e}
+                  </span>
+                ))}
               </div>
             )}
 
@@ -2999,6 +3235,15 @@ const MessageItem = memo(function MessageItem({
                       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5"><path d="M10.868 2.884c-.321-.772-1.415-.772-1.736 0l-1.83 4.401-4.753.381c-.833.067-1.171 1.107-.536 1.651l3.62 3.102-1.106 4.637c-.194.811.71 1.45 1.438 1.016l4.085-2.52 4.085 2.52c.728.434 1.632-.205 1.438-1.016l-1.106-4.637 3.62-3.102c.635-.544.297-1.584-.536-1.65l-4.752-.382-1.831-4.401Z" /></svg>
                       React
                     </button>
+                    {msg.type === 'text' && msg.text && (
+                      <button
+                        onClick={() => { onMenuOpen(null); copyMessage(); }}
+                        className="w-full flex items-center gap-2 px-3 py-2 text-xs text-[#ccc] hover:bg-white/5 transition-colors"
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5"><path fillRule="evenodd" d="M13.887 3.182c.396.037.79.08 1.183.128C16.194 3.45 17 4.414 17 5.517V16.75A2.25 2.25 0 0 1 14.75 19h-9.5A2.25 2.25 0 0 1 3 16.75V5.517c0-1.103.806-2.068 1.93-2.207a41.758 41.758 0 0 1 1.183-.128 9.622 9.622 0 0 1 1.17-.123V3.25A2.25 2.25 0 0 1 9.5 1h1a2.25 2.25 0 0 1 2.25 2.25v.09c.396.023.79.07 1.137.125ZM10.25 2.5a.75.75 0 0 0-.75.75v.09c.575.024 1.148.077 1.75.15v-.24a.75.75 0 0 0-.75-.75h-1ZM5.417 4.933c.356-.041.718-.063 1.083-.073v.84a.75.75 0 0 0 1.5 0V4.86c.398.014.796.035 1.19.063a52.28 52.28 0 0 1 1.19.063v.887a.75.75 0 0 0 1.5 0v-.88c.398.03.79.068 1.177.112.768.087 1.343.728 1.343 1.488V16.75a.75.75 0 0 1-.75.75h-9.5a.75.75 0 0 1-.75-.75V5.517c0-.76.575-1.401 1.343-1.488Z" clipRule="evenodd" /></svg>
+                        Copy
+                      </button>
+                    )}
                     {isOwn && (
                       <button
                         onClick={() => { onMenuOpen(null); onEdit(msg); }}

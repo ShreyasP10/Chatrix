@@ -2,6 +2,8 @@ export interface UserProfile {
   uid: string;
   name: string;
   createdAt: number;
+  avatarEmoji?: string;
+  avatarColor?: string;
 }
 
 export interface JoinedRoom {
@@ -164,6 +166,8 @@ export interface RoomSettings {
   autoDelete: boolean;
   lastActivityAt: number | null;
   createdAt: number;
+  blurWords: string[];
+  effectWords: string[];
 }
 
 export interface DeviceInfo {
