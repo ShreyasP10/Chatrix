@@ -77,6 +77,28 @@ export async function decrypt(
 }
 
 /**
+ * Derive an AES key from a user-supplied backup password.
+ * The random salt is stored with the backup so restore can re-derive the key.
+ */
+export async function derivePasswordKey(password: string, salt: Uint8Array<ArrayBuffer>): Promise<CryptoKey> {
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(password),
+    'PBKDF2',
+    false,
+    ['deriveKey']
+  );
+
+  return crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt, iterations: 150_000, hash: 'SHA-256' },
+    keyMaterial,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt']
+  );
+}
+
+/**
  * Room safety fingerprint ("message DNA"): 12 hex chars from SHA-256 of the
  * room code, formatted like a safety number, e.g. "A1B2-C3D4-E5F6".
  */

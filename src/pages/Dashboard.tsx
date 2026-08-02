@@ -16,7 +16,7 @@ import {
 } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { localDB } from '../lib/db';
-import { deriveKey, decrypt } from '../lib/crypto';
+import { deriveKey, decrypt, encrypt, derivePasswordKey } from '../lib/crypto';
 import { deleteRoomData } from '../lib/roomUtils';
 import { useStore } from '../store/useStore';
 import { useInstallPrompt } from '../hooks/useInstallPrompt';
@@ -24,7 +24,7 @@ import { swSend } from '../lib/sw';
 
 import Avatar, { getInitials } from '../components/Avatar';
 
-import type { JoinedRoom } from '../types';
+import type { JoinedRoom, UserProfile } from '../types';
 
 const VAPID_KEY = import.meta.env.VITE_FIREBASE_VAPID_KEY;
 
@@ -43,6 +43,7 @@ export default function Dashboard() {
   const [createName, setCreateName] = useState('');
   const [createType, setCreateType] = useState<'permanent' | 'auto'>('permanent');
   const [showAvatarPicker, setShowAvatarPicker] = useState(false);
+  const [showBackup, setShowBackup] = useState(false);
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const { user, setUser, joinedRooms, setJoinedRooms, addJoinedRoom, removeJoinedRoom } = useStore();
@@ -293,22 +294,178 @@ export default function Dashboard() {
     } catch {}
   };
 
-  const backupData = () => {
-    const payload = {
-      app: 'chatrix',
-      version: 1,
-      exportedAt: new Date().toISOString(),
-      rooms: useStore.getState().joinedRooms,
-    };
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const downloadFile = (filename: string, content: string, mime: string) => {
+    const blob = new Blob([content], { type: mime });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `chatrix-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    a.download = filename;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
+  const buildBackup = async (
+    format: 'json' | 'txt' | 'md',
+    includeScheduled: boolean,
+    includeProfile: boolean,
+    password: string
+  ) => {
+    if (!user) return;
+    const payload: any = {
+      app: 'chatrix',
+      version: 2,
+      exportedAt: new Date().toISOString(),
+      rooms: useStore.getState().joinedRooms,
+    };
+    if (includeScheduled) {
+      payload.scheduled = await localDB.scheduled.toArray();
+    }
+    if (includeProfile) {
+      const profile = await localDB.userProfile.get(user.uid);
+      if (profile) payload.profile = profile;
+    }
+
+    let finalContent: string;
+    let ext: string;
+    let mime: string;
+    const json = JSON.stringify(payload, null, 2);
+    const date = new Date().toISOString().slice(0, 10);
+
+    if (password) {
+      const salt = crypto.getRandomValues(new Uint8Array(16));
+      const key = await derivePasswordKey(password, salt);
+      const { ciphertext, iv } = await encrypt(json, key);
+      const b64 = (b: ArrayBuffer) => {
+        const bytes = new Uint8Array(b);
+        let bin = '';
+        for (const x of bytes) bin += String.fromCharCode(x);
+        return btoa(bin);
+      };
+      finalContent = JSON.stringify({
+        app: 'chatrix',
+        encrypted: true,
+        version: 2,
+        exportedAt: new Date().toISOString(),
+        salt: b64(salt.buffer),
+        iv,
+        ciphertext,
+      }, null, 2);
+      ext = 'json';
+      mime = 'application/json';
+    } else if (format === 'txt') {
+      const lines: string[] = [
+        '==========================================',
+        ' CHATRIX BACKUP  (text export)',
+        ` Exported: ${new Date().toISOString()}`,
+        ` Rooms: ${payload.rooms.length}`,
+        '==========================================',
+        '',
+      ];
+      payload.rooms.forEach((r: any, i: number) => {
+        lines.push(`ROOM ${i + 1}`);
+        lines.push(`  Code: ${r.code}`);
+        lines.push(`  Name: ${r.name || `Room ${r.code}`}`);
+        lines.push(`  Joined: ${new Date(r.joinedAt || Date.now()).toISOString()}`);
+        lines.push(`  Last read: ${r.lastReadTimestamp ? new Date(r.lastReadTimestamp).toISOString() : 'never'}`);
+        lines.push('');
+      });
+      if (payload.scheduled) {
+        lines.push(`Scheduled messages: ${payload.scheduled.length}`);
+        payload.scheduled.forEach((s: any) => {
+          lines.push(`  ${new Date(s.sendAtMs).toISOString()}  ${s.roomCode}  ${(s.textPreview || '').slice(0, 60)}`);
+        });
+        lines.push('');
+      }
+      if (payload.profile) {
+        lines.push(`Profile: ${payload.profile.name}`);
+        lines.push('');
+      }
+      lines.push('------------------------------------------');
+      lines.push('To restore, open the Chatrix app and use Restore with this file.');
+      lines.push('');
+      lines.push('-----BEGIN CHATRIX BACKUP-----');
+      lines.push(json);
+      lines.push('-----END CHATRIX BACKUP-----');
+      finalContent = lines.join('\n');
+      ext = 'txt';
+      mime = 'text/plain';
+    } else if (format === 'md') {
+      const md: string[] = [
+        '# Chatrix Backup',
+        '',
+        `Generated by Chatrix on **${new Date().toISOString()}**.`,
+        '',
+        `## Rooms (${payload.rooms.length})`,
+        '',
+        '| Code | Name | Joined | Last read |',
+        '| --- | --- | --- | --- |',
+      ];
+      payload.rooms.forEach((r: any) => {
+        md.push(`| ${r.code} | ${r.name || `Room ${r.code}`} | ${new Date(r.joinedAt || Date.now()).toISOString()} | ${r.lastReadTimestamp ? new Date(r.lastReadTimestamp).toISOString() : 'never'} |`);
+      });
+      if (payload.scheduled) {
+        md.push('', `## Scheduled messages (${payload.scheduled.length})`, '');
+        payload.scheduled.forEach((s: any) => {
+          md.push(`- \`${new Date(s.sendAtMs).toISOString()}\` in \`${s.roomCode}\` — ${(s.textPreview || '').slice(0, 80)}`);
+        });
+      }
+      if (payload.profile) {
+        md.push('', '## Profile', '', `- **Name:** ${payload.profile.name}`, `- **Avatar:** ${payload.profile.avatarEmoji || 'none'} (${payload.profile.avatarColor || 'default'})`);
+      }
+      md.push(
+        '',
+        '## Restore',
+        '',
+        'Open the Chatrix app, go to the dashboard and use **Restore** with this file.',
+        'The machine-readable payload below is embedded for restore:',
+        '',
+        '```json',
+        '-----BEGIN CHATRIX BACKUP-----',
+        json,
+        '-----END CHATRIX BACKUP-----',
+        '```',
+      );
+      finalContent = md.join('\n');
+      ext = 'md';
+      mime = 'text/markdown';
+    } else {
+      finalContent = json;
+      ext = 'json';
+      mime = 'application/json';
+    }
+
+    downloadFile(`chatrix-backup-${date}.${ext}`, finalContent, mime);
+  };
+
+  const parseBackup = async (file: File): Promise<any> => {
+    const text = await file.text();
+    let payload: any;
+    const trimmed = text.trim();
+    if (trimmed.startsWith('{')) {
+      payload = JSON.parse(trimmed);
+    } else {
+      const m = trimmed.match(/-----BEGIN CHATRIX BACKUP-----([\s\S]*?)-----END CHATRIX BACKUP-----/);
+      if (!m) throw new Error('no-payload');
+      payload = JSON.parse(m[1]);
+    }
+    if (payload.encrypted === true) {
+      const password = window.prompt('This backup is encrypted. Enter the backup password:');
+      if (password === null) throw new Error('cancelled');
+      const key = await derivePasswordKey(password, Uint8Array.from(atob(payload.salt), (c) => c.charCodeAt(0)));
+      let plain: string;
+      try {
+        plain = await decrypt(payload.ciphertext, payload.iv, key);
+      } catch {
+        throw new Error('wrong-password');
+      }
+      payload = JSON.parse(plain);
+    }
+    if (payload.app !== 'chatrix' || !Array.isArray(payload.rooms)) {
+      throw new Error('invalid');
+    }
+    return payload;
   };
 
   const handleRestoreFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -316,11 +473,7 @@ export default function Dashboard() {
     if (e.target) e.target.value = '';
     if (!file || !user) return;
     try {
-      const parsed = JSON.parse(await file.text());
-      if (parsed.app !== 'chatrix' || !Array.isArray(parsed.rooms)) {
-        setError('Invalid backup file');
-        return;
-      }
+      const parsed = await parseBackup(file);
       let restored = 0;
       for (const r of parsed.rooms) {
         if (!r.code || typeof r.code !== 'string') continue;
@@ -336,11 +489,37 @@ export default function Dashboard() {
         addJoinedRoom(room);
         restored++;
       }
+      if (Array.isArray(parsed.scheduled) && parsed.scheduled.length > 0) {
+        await localDB.scheduled.bulkPut(
+          parsed.scheduled
+            .filter((s: any) => s && s.id && s.roomCode)
+            .map((s: any) => ({
+              id: s.id,
+              roomCode: s.roomCode,
+              sendAtMs: s.sendAtMs || Date.now(),
+              textPreview: s.textPreview || '',
+            }))
+        );
+      }
+      if (parsed.profile && parsed.profile.uid === user.uid) {
+        const current = useStore.getState().user;
+        const updated = {
+          ...(current || parsed.profile),
+          name: parsed.profile.name || current?.name,
+          avatarEmoji: parsed.profile.avatarEmoji,
+          avatarColor: parsed.profile.avatarColor,
+        } as UserProfile;
+        await localDB.userProfile.put(updated);
+        setUser(updated);
+      }
       const allRooms = [...useStore.getState().joinedRooms.map((x) => x.code), ...parsed.rooms.map((r: any) => r.code)];
       swSend({ type: 'WATCH_ROOMS', rooms: Array.from(new Set(allRooms)) });
       setError(restored > 0 ? `Restored ${restored} room${restored !== 1 ? 's' : ''}` : 'No rooms found in backup');
-    } catch {
-      setError('Could not read backup file');
+    } catch (err: any) {
+      if (err?.message === 'wrong-password') setError('Wrong backup password');
+      else if (err?.message === 'cancelled') setError('');
+      else if (err?.message === 'no-payload') setError('No backup payload found in file');
+      else setError('Could not read backup file');
     }
   };
 
@@ -413,9 +592,9 @@ export default function Dashboard() {
             <p className="text-xs text-[#555]">Chatrix</p>
           </div>
           <button
-            onClick={backupData}
+            onClick={() => setShowBackup(true)}
             className="text-[#444] hover:text-[#007AFF] p-1.5 rounded-lg hover:bg-white/5 transition-all shrink-0"
-            title="Backup rooms (download)"
+            title="Backup (download)"
           >
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
               <path d="M10.75 2.75a.75.75 0 0 0-1.5 0v8.614L6.295 8.235a.75.75 0 1 0-1.09 1.03l4.25 4.5a.75.75 0 0 0 1.09 0l4.25-4.5a.75.75 0 0 0-1.09-1.03l-2.955 3.129V2.75Z" />
@@ -425,7 +604,7 @@ export default function Dashboard() {
           <button
             onClick={() => restoreInputRef.current?.click()}
             className="text-[#444] hover:text-[#007AFF] p-1.5 rounded-lg hover:bg-white/5 transition-all shrink-0"
-            title="Restore rooms (upload backup)"
+            title="Restore (upload backup)"
           >
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
               <path d="M9.25 13.25a.75.75 0 0 0 1.5 0V4.636l2.955 3.129a.75.75 0 0 0 1.09-1.03l-4.25-4.5a.75.75 0 0 0-1.09 0l-4.25 4.5a.75.75 0 1 0 1.09 1.03l2.955-3.13v8.615Z" />
@@ -435,11 +614,21 @@ export default function Dashboard() {
           <input
             ref={restoreInputRef}
             type="file"
-            accept=".json,application/json"
+            accept=".json,.txt,.md,application/json,text/plain,text/markdown"
             className="hidden"
             onChange={handleRestoreFile}
           />
         </div>
+      )}
+
+      {showBackup && user && (
+        <BackupModal
+          onDownload={async (format, includeScheduled, includeProfile, password) => {
+            await buildBackup(format, includeScheduled, includeProfile, password);
+            setShowBackup(false);
+          }}
+          onClose={() => setShowBackup(false)}
+        />
       )}
 
       {showAvatarPicker && user && (
@@ -733,6 +922,155 @@ function AvatarPickerModal({
                 Save
               </button>
             </div>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
+function BackupModal({
+  onDownload,
+  onClose,
+}: {
+  onDownload: (format: 'json' | 'txt' | 'md', includeScheduled: boolean, includeProfile: boolean, password: string) => void;
+  onClose: () => void;
+}) {
+  const [format, setFormat] = useState<'json' | 'txt' | 'md'>('json');
+  const [includeScheduled, setIncludeScheduled] = useState(true);
+  const [includeProfile, setIncludeProfile] = useState(true);
+  const [usePassword, setUsePassword] = useState(false);
+  const [password, setPassword] = useState('');
+  const [scheduledCount, setScheduledCount] = useState(0);
+  const [roomCount, setRoomCount] = useState(0);
+
+  useEffect(() => {
+    localDB.scheduled.count().then(setScheduledCount).catch(() => {});
+    localDB.joinedRooms.count().then(setRoomCount).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  const FORMATS: { id: 'json' | 'txt' | 'md'; label: string; desc: string }[] = [
+    { id: 'json', label: 'JSON', desc: 'Exact machine-readable backup' },
+    { id: 'txt', label: 'TXT', desc: 'Readable text + restore payload' },
+    { id: 'md', label: 'README', desc: 'Markdown doc + restore payload' },
+  ];
+
+  const canDownload = !usePassword || password.length >= 4;
+
+  return (
+    <>
+      <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm" onClick={onClose} />
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 pointer-events-none">
+        <div
+          className="bg-[#1C1C1E] border border-[#333] rounded-2xl w-full max-w-md shadow-2xl pointer-events-auto animate-fade-in overflow-hidden my-auto"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="flex items-center justify-between px-5 py-4 border-b border-[#333]">
+            <h2 className="text-sm font-semibold text-white">Backup data</h2>
+            <button onClick={onClose} className="text-[#555] hover:text-white p-1.5 rounded-lg hover:bg-white/5 transition-all">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4"><path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z" /></svg>
+            </button>
+          </div>
+
+          <div className="px-5 py-4 space-y-5 max-h-[70vh] overflow-y-auto">
+            <div>
+              <p className="text-[11px] text-[#555] font-medium uppercase tracking-wider mb-2">Format</p>
+              <div className="space-y-1.5">
+                {FORMATS.map((f) => (
+                  <button
+                    key={f.id}
+                    onClick={() => setFormat(f.id)}
+                    disabled={usePassword && f.id !== 'json'}
+                    className={`w-full flex items-center justify-between p-3 rounded-xl border text-left transition-all ${
+                      format === f.id && !(usePassword && f.id !== 'json')
+                        ? 'border-[#007AFF] bg-[#007AFF]/10'
+                        : 'border-[#333] bg-[#0D0D0D] hover:border-[#555] disabled:opacity-30'
+                    }`}
+                  >
+                    <span>
+                      <span className="block text-sm font-medium text-white">{f.label}</span>
+                      <span className="block text-[11px] text-[#555] mt-0.5">{f.desc}</span>
+                    </span>
+                    <span className={`w-4 h-4 rounded-full border-2 flex items-center justify-center shrink-0 ${format === f.id && !(usePassword && f.id !== 'json') ? 'border-[#007AFF]' : 'border-[#444]'}`}>
+                      {format === f.id && !(usePassword && f.id !== 'json') && <span className="w-2 h-2 rounded-full bg-[#007AFF]" />}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <p className="text-[11px] text-[#555] font-medium uppercase tracking-wider mb-2">Include</p>
+              <div className="space-y-2">
+                <label className="flex items-center justify-between cursor-pointer">
+                  <span>
+                    <span className="block text-sm text-white">Scheduled messages</span>
+                    <span className="block text-[11px] text-[#555] mt-0.5">{scheduledCount} pending message{scheduledCount !== 1 ? 's' : ''}</span>
+                  </span>
+                  <button
+                    onClick={() => setIncludeScheduled((v) => !v)}
+                    className={`w-11 h-6 rounded-full transition-colors relative shrink-0 ${includeScheduled ? 'bg-[#34C759]' : 'bg-[#3A3A3C]'}`}
+                  >
+                    <span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all ${includeScheduled ? 'left-[22px]' : 'left-0.5'}`} />
+                  </button>
+                </label>
+                <label className="flex items-center justify-between cursor-pointer">
+                  <span>
+                    <span className="block text-sm text-white">Profile &amp; avatar</span>
+                    <span className="block text-[11px] text-[#555] mt-0.5">Name and custom avatar</span>
+                  </span>
+                  <button
+                    onClick={() => setIncludeProfile((v) => !v)}
+                    className={`w-11 h-6 rounded-full transition-colors relative shrink-0 ${includeProfile ? 'bg-[#34C759]' : 'bg-[#3A3A3C]'}`}
+                  >
+                    <span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all ${includeProfile ? 'left-[22px]' : 'left-0.5'}`} />
+                  </button>
+                </label>
+              </div>
+            </div>
+
+            <div>
+              <label className="flex items-center justify-between cursor-pointer mb-2">
+                <span className="block text-sm text-white">Password protect</span>
+                <button
+                  onClick={() => setUsePassword((v) => !v)}
+                  className={`w-11 h-6 rounded-full transition-colors relative shrink-0 ${usePassword ? 'bg-[#FF9500]' : 'bg-[#3A3A3C]'}`}
+                >
+                  <span className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all ${usePassword ? 'left-[22px]' : 'left-0.5'}`} />
+                </button>
+              </label>
+              {usePassword && (
+                <>
+                  <input
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="Backup password (min 4 chars)"
+                    className="w-full bg-[#0D0D0D] text-white text-sm rounded-lg px-3 py-2 outline-none border border-[#333] focus:border-[#555] placeholder-[#555]"
+                  />
+                  <p className="text-[10px] text-[#555] mt-1">Encrypted with AES-256. Encrypted backups are always .json.</p>
+                </>
+              )}
+            </div>
+          </div>
+
+          <div className="px-5 py-4 border-t border-[#333]">
+            <button
+              onClick={() => onDownload(format, includeScheduled, includeProfile, password)}
+              disabled={!canDownload}
+              className="w-full py-2.5 rounded-xl text-sm font-medium bg-[#007AFF] text-white hover:bg-[#0066CC] disabled:opacity-30 disabled:cursor-not-allowed transition-all"
+            >
+              Download backup
+            </button>
+            <p className="text-[10px] text-[#555] text-center mt-2">{roomCount} room{roomCount !== 1 ? 's' : ''} will be included</p>
           </div>
         </div>
       </div>
