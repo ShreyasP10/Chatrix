@@ -14,6 +14,11 @@ interface Props {
   onInvite: (uid: string, name: string) => Promise<void>;
   invitations: CallInvitation[];
   onDismissInvitation: () => void;
+  sharingScreen: boolean;
+  screenShareUid: string | null;
+  remoteScreens: { uid: string; stream: MediaStream }[];
+  onStartScreenShare: () => Promise<boolean>;
+  onStopScreenShare: () => void;
 }
 
 export default function VoiceCallUI({
@@ -28,8 +33,14 @@ export default function VoiceCallUI({
   onInvite,
   invitations,
   onDismissInvitation,
+  sharingScreen,
+  screenShareUid,
+  remoteScreens,
+  onStartScreenShare,
+  onStopScreenShare,
 }: Props) {
   const [showInvite, setShowInvite] = useState(false);
+  const [sharingError, setSharingError] = useState(false);
 
   if (!callState || !callState.active) return null;
 
@@ -54,9 +65,44 @@ export default function VoiceCallUI({
     );
   }
 
+  const sharerName = screenShareUid
+    ? callParticipants.find((p) => p.uid === screenShareUid)?.name || 'A member'
+    : null;
+  const videoCount = remoteScreens.length;
+
   // In call – show Discord-style bar
   return (
     <>
+      {remoteScreens.map((s) => (
+        <div key={s.uid} className="fixed bottom-20 left-0 right-0 z-40 px-4">
+          <div className="max-w-md md:max-w-lg lg:max-w-xl mx-auto">
+            <div className="rounded-2xl overflow-hidden border border-[#333] bg-black shadow-2xl">
+              <div className="flex items-center justify-between px-3 py-1.5 bg-[#0D0D0D]">
+                <span className="text-[11px] text-[#ccc] font-medium flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
+                  {callParticipants.find((p) => p.uid === s.uid)?.name || 'A member'} is sharing screen
+                </span>
+              </div>
+              <video
+                autoPlay
+                playsInline
+                className="w-full max-h-[38vh] bg-black object-contain"
+                ref={(el) => { if (el && el.srcObject !== s.stream) el.srcObject = s.stream; }}
+              />
+            </div>
+          </div>
+        </div>
+      ))}
+      {videoCount === 0 && sharerName && (
+        <div className="fixed bottom-20 left-0 right-0 z-40 px-4">
+          <div className="max-w-md md:max-w-lg lg:max-w-xl mx-auto">
+            <div className="rounded-2xl border border-[#333] bg-[#0D0D0D] px-4 py-3 shadow-2xl flex items-center gap-2.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
+              <span className="text-xs text-[#ccc]">{sharerName} is sharing screen — wait for the stream...</span>
+            </div>
+          </div>
+        </div>
+      )}
       <div className="fixed bottom-0 left-0 right-0 z-40 bg-[#0D0D0D] border-t border-[#222] backdrop-blur-md">
         <div className="max-w-md md:max-w-lg lg:max-w-xl mx-auto px-4 py-3">
           <div className="flex items-center justify-between">
@@ -98,6 +144,31 @@ export default function VoiceCallUI({
                   <path d="M10.362 1.093a.75.75 0 0 0-.724 0l-8.5 4.685a.75.75 0 0 0 0 1.294l8.5 4.685a.75.75 0 0 0 .724 0l8.5-4.685a.75.75 0 0 0 0-1.294l-8.5-4.685Z" />
                   <path d="M2.287 7.5 1.09 8.22a.75.75 0 0 0 0 1.294l8.5 4.685a.75.75 0 0 0 .724 0l8.5-4.685a.75.75 0 0 0 0-1.294L17.713 7.5 10 12.06 2.287 7.5Z" />
                   <path d="M2.287 12 1.09 12.72a.75.75 0 0 0 0 1.294l8.5 4.685a.75.75 0 0 0 .724 0l8.5-4.685a.75.75 0 0 0 0-1.294L17.713 12 10 16.56 2.287 12Z" />
+                </svg>
+              </button>
+
+              <button
+                onClick={async () => {
+                  if (sharingScreen) {
+                    onStopScreenShare();
+                  } else {
+                    const ok = await onStartScreenShare();
+                    setSharingError(!ok);
+                  }
+                }}
+                className={`p-2 rounded-lg transition-all ${
+                  sharingScreen
+                    ? 'text-[#00FF88] bg-[#00FF88]/15 hover:bg-[#00FF88]/25'
+                    : sharingError
+                      ? 'text-red-400 bg-red-400/10 hover:bg-red-400/20'
+                      : 'text-[#555] hover:text-white hover:bg-white/5'
+                }`}
+                title={sharingScreen ? 'Stop sharing screen' : sharingError ? 'Screen sharing unavailable' : 'Share screen'}
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5">
+                  <path fillRule="evenodd" d="M2 5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5Zm1.5 0a.5.5 0 0 1 .5-.5h12a.5.5 0 0 1 .5.5v8a.5.5 0 0 1-.5.5H4a.5.5 0 0 1-.5-.5V5Z" clipRule="evenodd" />
+                  <path d="M10 8a1.25 1.25 0 1 0 0 2.5A1.25 1.25 0 0 0 10 8Z" />
+                  <path d="M6.5 17.5h7a.75.75 0 0 0 0-1.5h-7a.75.75 0 0 0 0 1.5Z" />
                 </svg>
               </button>
 

@@ -1679,6 +1679,11 @@ export default function ChatScreen() {
         onInvite={voiceCall.inviteMember}
         invitations={callInvitations}
         onDismissInvitation={voiceCall.dismissInvitation}
+        sharingScreen={voiceCall.sharingScreen}
+        screenShareUid={voiceCall.screenShareUid}
+        remoteScreens={voiceCall.remoteScreens}
+        onStartScreenShare={voiceCall.startScreenShare}
+        onStopScreenShare={voiceCall.stopScreenShare}
       />
 
       {showMembers && (
