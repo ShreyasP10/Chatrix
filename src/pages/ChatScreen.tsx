@@ -456,7 +456,6 @@ export default function ChatScreen() {
     const q = query(
       collection(db, 'rooms', code, 'messages'),
       orderBy('seq', 'desc'),
-      orderBy('timestamp', 'desc'),
       limit(PAGE_SIZE)
     );
 
@@ -507,7 +506,7 @@ export default function ChatScreen() {
 
         // Keep pagination state in sync
         lastDocRef.current = docs[docs.length - 1] || null;
-        setHasMore(docs.length >= PAGE_SIZE);
+        setHasMore(docs.length === PAGE_SIZE);
 
         if (!initialSnapshotDone.current) {
           initialSnapshotDone.current = true;
@@ -631,7 +630,6 @@ export default function ChatScreen() {
     const q = query(
       collection(db, 'rooms', code, 'messages'),
       orderBy('seq', 'desc'),
-      orderBy('timestamp', 'desc'),
       startAfter(lastDocRef.current),
       limit(PAGE_SIZE)
     );
