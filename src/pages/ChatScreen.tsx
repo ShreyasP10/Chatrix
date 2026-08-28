@@ -1507,6 +1507,7 @@ export default function ChatScreen() {
               hasEffect={Boolean(
                 roomSettings?.effectWords?.some((w) => w && new RegExp(`(^|[^a-z0-9])${w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([^a-z0-9]|$)`).test(msg.text.toLowerCase()))
               )}
+              showLinkPreview={roomSettings?.linkPreviews !== false}
               prevSenderSame={i > 0 && messages[i - 1].senderUid === msg.senderUid}
               replyCount={replyCount}
               onJumpToMessage={scrollToMessage}
@@ -2415,12 +2416,14 @@ function SettingsModal({
   const [wordsInput, setWordsInput] = useState((settings?.blockedWords || []).join(', '));
   const [blurInput, setBlurInput] = useState((settings?.blurWords || []).join(', '));
   const [effectInput, setEffectInput] = useState((settings?.effectWords || []).join(', '));
+  const [linkPreviews, setLinkPreviews] = useState(settings?.linkPreviews ?? true);
 
   useEffect(() => {
     setSlowMode(settings?.slowModeSec || 0);
     setWordsInput((settings?.blockedWords || []).join(', '));
     setBlurInput((settings?.blurWords || []).join(', '));
     setEffectInput((settings?.effectWords || []).join(', '));
+    setLinkPreviews(settings?.linkPreviews ?? true);
   }, [settings]);
 
   useEffect(() => {
@@ -2435,7 +2438,7 @@ function SettingsModal({
     const words = wordsInput.split(',').map((w) => w.trim().toLowerCase()).filter(Boolean);
     const blurWords = blurInput.split(',').map((w) => w.trim().toLowerCase()).filter(Boolean);
     const effectWords = effectInput.split(',').map((w) => w.trim().toLowerCase()).filter(Boolean);
-    onSaveSettings({ slowModeSec: slowMode, blockedWords: words, blurWords, effectWords });
+    onSaveSettings({ slowModeSec: slowMode, blockedWords: words, blurWords, effectWords, linkPreviews });
   };
 
   const TONES: { id: 'pop' | 'ding' | 'soft' | 'none'; label: string }[] = [
@@ -2539,6 +2542,19 @@ function SettingsModal({
                     className="w-full bg-[#0D0D0D] text-white text-sm rounded-lg px-3 py-2 outline-none border border-[#333] focus:border-[#555] placeholder-[#555]"
                   />
                   <p className="text-[10px] text-[#555] mt-1">Comma-separated. Triggers a burst animation when sent.</p>
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-sm font-medium text-white">Link previews</p>
+                    <p className="text-[11px] text-[#555] mt-0.5">Show rich previews for links</p>
+                  </div>
+                  <button
+                    onClick={() => setLinkPreviews(!linkPreviews)}
+                    className={`w-11 h-6 rounded-full transition-colors relative ${linkPreviews ? 'bg-[#007AFF]' : 'bg-[#3A3A3C]'}`}
+                  >
+                    <div className={`absolute top-0.5 w-5 h-5 bg-white rounded-full transition-all ${linkPreviews ? 'left-[22px]' : 'left-0.5'}`} />
+                  </button>
                 </div>
 
                 <div className="flex items-center justify-between">
@@ -3173,6 +3189,7 @@ const MessageItem = memo(function MessageItem({
   onJumpToThread,
   blurWords,
   hasEffect,
+  showLinkPreview,
 }: {
   msg: DecryptedMessage;
   isOwn: boolean;
@@ -3196,6 +3213,7 @@ const MessageItem = memo(function MessageItem({
   onJumpToThread: (rootId: string) => void;
   blurWords?: string[];
   hasEffect?: boolean;
+  showLinkPreview?: boolean;
 }) {
   const [hoveredReaction, setHoveredReaction] = useState<string | null>(null);
   const [revealedWords, setRevealedWords] = useState<Set<string>>(new Set());
@@ -3474,7 +3492,7 @@ const MessageItem = memo(function MessageItem({
               </div>
             )}
 
-            {linkPreview && (
+            {linkPreview && showLinkPreview !== false && (
               <a
                 href={linkPreview}
                 target="_blank"
