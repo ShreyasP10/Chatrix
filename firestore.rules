@@ -1,9 +1,11 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Rooms: 4-digit code, anyone with code can read. Writes validated.
+    // Rooms are secret: only those who know the 4-digit code can access.
+    // Enumeration is blocked (list: false) — you must know the code to get the doc.
     match /rooms/{roomCode} {
-      allow read: if true;
+      allow get: if true;
+      allow list: if false;
       allow create: if roomCode.matches('^[0-9]{4}$')
         && request.resource.data.keys().hasAll(['name','createdAt'])
         && request.resource.data.name is string
