@@ -181,6 +181,38 @@ export default function VoiceCallUI({
                 </svg>
               </button>
 
+              <div className="flex items-center gap-1 ml-1 border-l border-[#222] pl-2">
+                {[
+                  { e: '👏', f: 300 },
+                  { e: '😂', f: 500 },
+                  { e: '🎉', f: 700 },
+                  { e: '💥', f: 200 },
+                ].map((s) => (
+                  <button
+                    key={s.e}
+                    onClick={() => {
+                      try {
+                        const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+                        const o = ctx.createOscillator();
+                        const g = ctx.createGain();
+                        o.frequency.value = s.f;
+                        o.connect(g);
+                        g.connect(ctx.destination);
+                        g.gain.setValueAtTime(0.3, ctx.currentTime);
+                        g.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.4);
+                        o.start();
+                        o.stop(ctx.currentTime + 0.4);
+                        setTimeout(() => ctx.close().catch(() => {}), 500);
+                      } catch {}
+                    }}
+                    className="w-7 h-7 rounded-lg bg-white/5 hover:bg-white/10 text-xs flex items-center justify-center transition-colors"
+                    title={`Play ${s.e}`}
+                  >
+                    {s.e}
+                  </button>
+                ))}
+              </div>
+
               <button
                 onClick={onToggleMute}
                 className={`p-2 rounded-lg transition-all ${

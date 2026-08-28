@@ -1113,7 +1113,8 @@ export default function ChatScreen() {
     return out;
   };
 
-  const exportChat = async (format: 'json' | 'txt') => {
+  const exportChat = async (format: 'json' | 'txt' | 'pdf') => {
+    if (format === 'pdf') { await exportPDF(); return; }
     if (!code || exporting) return;
     setExporting(true);
     try {
@@ -1158,6 +1159,33 @@ export default function ChatScreen() {
     } catch {
       showToast('Export failed');
     }
+    setExporting(false);
+  };
+
+  const exportPDF = async () => {
+    if (!code || exporting) return;
+    setExporting(true);
+    try {
+      const docs = await fetchAllMessages();
+      const rows: { time: string; sender: string; message: string }[] = [];
+      for (const d of docs) {
+        const data = d.data();
+        let text = '';
+        if (data.sys) text = data.sys.type === 'join' ? `🟢 ${data.sys.name} joined` : `🚫 ${data.sys.name} removed`;
+        else if (data.poll) text = `📊 ${data.poll.question}`;
+        else {
+          const key = keys[data.kv ?? 0];
+          if (key) {
+            try { const dec = await decrypt(data.ciphertext, data.iv, key); const parsed = JSON.parse(dec); text = parsed.type === 'image' ? '[Image]' : parsed.type === 'file' ? `[File: ${parsed.file?.name || 'file'}]` : (parsed.text || dec); } catch { text = '[Cannot decrypt]'; }
+          } else text = '[Encrypted]';
+        }
+        rows.push({ time: new Date(data.timestamp?.toMillis?.() ?? Date.now()).toLocaleString(), sender: data.senderName || data.sys?.name || '', message: text });
+      }
+      const html = `<html><head><title>Chat ${code}</title><style>body{font-family:system-ui;padding:20px;background:#fff;color:#000}h1{font-size:18px;border-bottom:1px solid #ccc;padding-bottom:10px} .msg{margin:10px 0;padding:8px;border-bottom:1px solid #eee} .meta{color:#666;font-size:12px} .text{margin-top:4px}</style></head><body><h1>Chat ${code} - ${roomName} (${rows.length} messages)</h1><div>${rows.map((r) => `<div class=msg><div class=meta>${r.sender} · ${r.time}</div><div class=text>${r.message.replace(/</g,'&lt;')}</div></div>`).join('')}</div><script>window.print()<\/script></body></html>`;
+      const w = window.open('', '_blank');
+      if (w) { w.document.write(html); w.document.close(); }
+      showToast(`PDF ready — ${rows.length} messages`);
+    } catch { showToast('PDF export failed'); }
     setExporting(false);
   };
 
@@ -2557,6 +2585,15 @@ function SettingsModal({
                   </button>
                 </div>
 
+                <div>
+                  <p className="text-[11px] text-[#555] font-medium uppercase tracking-wider mb-2">Theme accent</p>
+                  <div className="flex gap-2">
+                    {['#007AFF','#FF2D55','#34C759','#FF9500','#AF52DE'].map((c) => (
+                      <button key={c} onClick={() => { localStorage.setItem('chatrix_accent', c); document.documentElement.style.setProperty('--accent', c); }} className="w-8 h-8 rounded-full border-2 border-[#333] hover:scale-110 transition-transform" style={{ backgroundColor: c }} />
+                    ))}
+                  </div>
+                </div>
+
                 <div className="flex items-center justify-between">
                   <div>
                     <p className="text-sm font-medium text-white">Freeze room</p>
@@ -2627,6 +2664,13 @@ function SettingsModal({
                   className="flex-1 py-2 rounded-lg text-xs font-medium border border-[#00FF88]/40 text-[#00FF88] bg-[#00FF88]/10 hover:bg-[#00FF88]/20 transition-all disabled:opacity-40"
                 >
                   Export .txt
+                </button>
+                <button
+                  onClick={() => (onExport as any)('pdf')}
+                  disabled={exporting}
+                  className="flex-1 py-2 rounded-lg text-xs font-medium border border-[#FF3B30]/40 text-[#FF3B30] bg-[#FF3B30]/10 hover:bg-[#FF3B30]/20 transition-all disabled:opacity-40"
+                >
+                  PDF
                 </button>
               </div>
               <p className="text-[10px] text-[#555] mt-1">
@@ -3050,6 +3094,9 @@ function SearchModal({
   onClose: () => void;
 }) {
   const [query, setQuery] = useState('');
+  const [senderFilter, setSenderFilter] = useState('');
+  const [hasLink, setHasLink] = useState(false);
+  const [hasImage, setHasImage] = useState(false);
   const [results, setResults] = useState<SearchIndexEntry[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
@@ -3067,7 +3114,7 @@ function SearchModal({
   useEffect(() => {
     let cancelled = false;
     const q = query.trim().toLowerCase();
-    if (!q) {
+    if (!q && !senderFilter && !hasLink && !hasImage) {
       setResults([]);
       setTotal(0);
       return;
@@ -3078,7 +3125,13 @@ function SearchModal({
         const all = await localDB.searchIndex.where('roomCode').equals(roomCode).toArray();
         if (cancelled) return;
         const matches = all
-          .filter((m) => m.text.toLowerCase().includes(q))
+          .filter((m) => {
+            if (q && !m.text.toLowerCase().includes(q)) return false;
+            if (senderFilter && !m.senderName.toLowerCase().includes(senderFilter.toLowerCase())) return false;
+            if (hasLink && !/https?:\/\//.test(m.text)) return false;
+            if (hasImage && !m.text.startsWith('data:image')) return false;
+            return true;
+          })
           .sort((a, b) => b.timestamp - a.timestamp);
         setTotal(matches.length);
         setResults(matches.slice(0, 50));
@@ -3088,7 +3141,7 @@ function SearchModal({
       if (!cancelled) setLoading(false);
     }, 250);
     return () => { cancelled = true; clearTimeout(t); };
-  }, [query, roomCode]);
+  }, [query, senderFilter, hasLink, hasImage, roomCode]);
 
   const highlight = (text: string, q: string) => {
     const idx = text.toLowerCase().indexOf(q.toLowerCase());
@@ -3129,6 +3182,11 @@ function SearchModal({
             <button onClick={onClose} className="text-[#555] hover:text-white p-1.5 rounded-lg hover:bg-white/5 transition-all shrink-0">
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4"><path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z" /></svg>
             </button>
+          </div>
+          <div className="px-4 py-2 border-b border-[#333] flex flex-wrap gap-2">
+            <input type="text" value={senderFilter} onChange={(e) => setSenderFilter(e.target.value)} placeholder="Filter by sender..." className="flex-1 min-w-[100px] bg-[#0D0D0D] text-white text-xs rounded-lg px-2 py-1.5 outline-none border border-[#333] placeholder-[#555]" />
+            <label className="flex items-center gap-1.5 text-xs text-[#555] cursor-pointer"><input type="checkbox" checked={hasLink} onChange={(e) => setHasLink(e.target.checked)} className="rounded" /> Has link</label>
+            <label className="flex items-center gap-1.5 text-xs text-[#555] cursor-pointer"><input type="checkbox" checked={hasImage} onChange={(e) => setHasImage(e.target.checked)} className="rounded" /> Has image</label>
           </div>
           <div className="overflow-y-auto">
             {query && results.length === 0 && !loading && (
