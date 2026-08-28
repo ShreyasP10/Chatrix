@@ -18,7 +18,7 @@ class ChatrixDB extends Dexie {
       joinedRooms: 'code',
       scheduled: 'id, roomCode, sendAtMs',
       searchIndex: 'msgId, roomCode, seq',
-    });
+    }).upgrade(() => {});
   }
 }
 

@@ -136,7 +136,7 @@ async function watchRooms(rooms: string[]) {
     const q = query(
       collection(firestoreDb, 'rooms', code, 'messages'),
       orderBy('timestamp', 'desc'),
-      limit(1)
+      limit(5)
     );
 
     const unsub = onSnapshot(q, (snap: any) => {
@@ -145,6 +145,10 @@ async function watchRooms(rooms: string[]) {
         const id = change.doc.id;
         if (notifiedIds.has(id)) return;
         notifiedIds.add(id);
+        if (notifiedIds.size > 500) {
+          const first = notifiedIds.values().next().value as string | undefined;
+          if (first) notifiedIds.delete(first);
+        }
         const d = change.doc.data();
         showNotif(code, d.senderName, d.replyToUid, d.mentionedUids);
       });

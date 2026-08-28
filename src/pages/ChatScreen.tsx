@@ -9,6 +9,7 @@ import {
   addDoc,
   updateDoc,
   serverTimestamp,
+  Timestamp,
   getDocs,
   getDoc,
   startAfter,
@@ -100,6 +101,7 @@ export default function ChatScreen() {
   const indexedIdsRef = useRef<Set<string>>(new Set());
   const seenMsgIds = useRef<Set<string>>(new Set());
   const burnScheduledRef = useRef<Set<string>>(new Set());
+  const burnTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const lastReadSeqRef = useRef(0);
   const myLastMsgTimeRef = useRef(0);
   const initialSnapshotDone = useRef(false);
@@ -121,12 +123,22 @@ export default function ChatScreen() {
   const voiceCall = useVoiceCall(code);
 
   useEffect(() => {
+    useStore.getState().setCallState(null);
+    useStore.getState().setCallParticipants([]);
+    useStore.getState().setCallInvitations([]);
+  }, [code]);
+
+  useEffect(() => {
     if (!code) return;
     let cancelled = false;
-    Promise.all([deriveKey(code, 0), deriveKey(code, 1), deriveKey(code, 2)])
-      .then(([k0, k1, k2]) => {
+    const maxVersion = Math.max(2, roomKeyVersion);
+    const versions = Array.from({ length: maxVersion + 1 }, (_, i) => i);
+    Promise.all(versions.map((v) => deriveKey(code, v)))
+      .then((derived) => {
         if (cancelled) return;
-        setKeys({ 0: k0, 1: k1, 2: k2 });
+        const next: Record<number, CryptoKey> = {};
+        derived.forEach((k, i) => { next[i] = k; });
+        setKeys(next);
       })
       .catch(() => {});
     roomFingerprint(code)
@@ -134,7 +146,7 @@ export default function ChatScreen() {
       .catch(() => setFingerprint(''));
     swSend({ type: 'ACTIVE_ROOM', code });
     return () => { cancelled = true; swSend({ type: 'ACTIVE_ROOM', code: null }); };
-  }, [code]);
+  }, [code, roomKeyVersion]);
 
   useEffect(() => {
     if (!code || roomKeyVersion <= 2) return;
@@ -246,25 +258,20 @@ export default function ChatScreen() {
       setMemberNameMap(map);
       setMemberList(list);
       setOnlineCount(onlineCount);
-    });
-    return unsub;
-  }, [code]);
 
-  // System feed: joins and removals
-  useEffect(() => {
-    if (!code || !user) return;
-    const q = query(collection(db, 'rooms', code, 'members'));
-    const unsub = onSnapshot(q, (snap) => {
-      snap.docChanges().forEach((change) => {
-        const uid = change.doc.id;
-        if (uid === user.uid) return;
-        const data = change.doc.data();
-        if (change.type === 'added') {
-          postSystemMessage(code, 'join', uid, data?.name || 'Someone');
-        } else if (change.type === 'modified' && data?.kicked === true) {
-          postSystemMessage(code, 'remove', uid, data?.name || 'Someone');
-        }
-      });
+      // System feed: joins and removals (merged to avoid duplicate listener)
+      if (user) {
+        snap.docChanges().forEach((change) => {
+          const uid = change.doc.id;
+          if (uid === user.uid) return;
+          const data = change.doc.data();
+          if (change.type === 'added' && data?.name && !data?.kicked) {
+            postSystemMessage(code, 'join', uid, data?.name || 'Someone');
+          } else if (change.type === 'modified' && data?.kicked === true) {
+            postSystemMessage(code, 'remove', uid, data?.name || 'Someone');
+          }
+        });
+      }
     });
     return unsub;
   }, [code, user]);
@@ -319,7 +326,7 @@ export default function ChatScreen() {
     };
 
     const setOffline = () => {
-      setDoc(memberRef, { online: false }, { merge: true }).catch(() => {});
+      updateDoc(memberRef, { online: false }).catch(() => {});
     };
 
     setOnline();
@@ -343,6 +350,7 @@ export default function ChatScreen() {
     const q = query(
       collection(db, 'rooms', code, 'messages'),
       orderBy('seq', 'desc'),
+      orderBy('timestamp', 'desc'),
       limit(PAGE_SIZE)
     );
 
@@ -360,9 +368,12 @@ export default function ChatScreen() {
           if (d.burn && d.timestamp?.toMillis && !burnScheduledRef.current.has(change.doc.id)) {
             burnScheduledRef.current.add(change.doc.id);
             const delay = Math.max(500, d.timestamp.toMillis() + BURN_TTL - now);
-            setTimeout(() => {
+            const timer = setTimeout(() => {
+              burnScheduledRef.current.delete(change.doc.id);
+              burnTimersRef.current.delete(change.doc.id);
               deleteDoc(doc(db, 'rooms', code, 'messages', change.doc.id)).catch(() => {});
             }, delay);
+            burnTimersRef.current.set(change.doc.id, timer);
           }
         }
 
@@ -481,6 +492,14 @@ export default function ChatScreen() {
   }, [code, cryptoKey, roomReady, setMessages, keys]);
 
   useEffect(() => {
+    return () => {
+      for (const t of burnTimersRef.current.values()) clearTimeout(t);
+      burnTimersRef.current.clear();
+      burnScheduledRef.current.clear();
+    };
+  }, [code]);
+
+  useEffect(() => {
     if (loading || loadingOlder) return;
     if (scrollAnchorRef.current) {
       const el = messagesRef.current;
@@ -506,13 +525,14 @@ export default function ChatScreen() {
     const q = query(
       collection(db, 'rooms', code, 'messages'),
       orderBy('seq', 'desc'),
+      orderBy('timestamp', 'desc'),
       startAfter(lastDocRef.current),
       limit(PAGE_SIZE)
     );
     const snap = await getDocs(q);
     const docs = snap.docs;
     lastDocRef.current = docs[docs.length - 1] || null;
-    setHasMore(docs.length >= PAGE_SIZE);
+    setHasMore(docs.length === PAGE_SIZE);
 
     const older = await Promise.all(
       docs.map((d) => decryptMessage(d.data(), d.id, keys))
@@ -566,7 +586,7 @@ export default function ChatScreen() {
     const lastAtIndex = textBeforeCursor.lastIndexOf('@');
     if (lastAtIndex !== -1) {
       const afterAt = textBeforeCursor.slice(lastAtIndex + 1);
-      if (!afterAt.includes(' ')) {
+      if (!/\s/.test(afterAt)) {
         setMentionQuery(afterAt);
         setMentionStartIndex(lastAtIndex);
         setMentionSelectedIndex(0);
@@ -806,7 +826,7 @@ export default function ChatScreen() {
       const token = Array.from(crypto.getRandomValues(new Uint8Array(8)))
         .map((b) => b.toString(16).padStart(2, '0')).join('');
       await setDoc(doc(db, 'rooms', code, 'invites', token), {
-        expiresAt: new Date(Date.now() + 24 * 3600 * 1000),
+        expiresAt: Timestamp.fromDate(new Date(Date.now() + 24 * 3600 * 1000)),
         uses: 0,
         maxUses: 1,
         createdBy: user.uid,
@@ -840,7 +860,7 @@ export default function ChatScreen() {
   useEffect(() => {
     if (!code || messages.length === 0) return;
     const entries = messages
-      .filter((m) => m.text && m.type !== 'image' && m.type !== 'file' && !indexedIdsRef.current.has(m.id))
+      .filter((m) => m.text && m.type !== 'image' && m.type !== 'file')
       .map((m) => ({
         msgId: m.id,
         roomCode: code,
@@ -2449,8 +2469,11 @@ function RichText({
     while ((wm = wordRe.exec(s))) {
       if (wm.index > wLast) parts.push(s.slice(wLast, wm.index));
       const word = wm[1];
-      const lower = word.toLowerCase();
-      const hit = blurWords.find((b) => b && lower.includes(b));
+      const hit = blurWords.find((b) => {
+        if (!b) return false;
+        const esc = b.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        return new RegExp(`\\b${esc}\\b`, 'i').test(word);
+      });
       if (hit) {
         if (revealed.has(hit)) {
           parts.push(
@@ -3105,19 +3128,26 @@ const MessageItem = memo(function MessageItem({
           ) : (
           <div className={`relative group ${isImage || isFile ? '' : 'max-w-full'}`}>
             {isImage ? (
-              <div
-                className={`max-w-full rounded-2xl overflow-hidden border border-[#333]/50 shadow-lg ${
-                  isOwn ? 'rounded-br-sm' : 'rounded-bl-sm'
-                }`}
-              >
-                <img
-                  src={msg.text}
-                  alt="Shared image"
-                  className="w-full h-auto max-h-72 object-cover"
-                  loading="lazy"
-                />
-              </div>
+              msg.text.startsWith('data:image/') ? (
+                <div
+                  className={`max-w-full rounded-2xl overflow-hidden border border-[#333]/50 shadow-lg ${
+                    isOwn ? 'rounded-br-sm' : 'rounded-bl-sm'
+                  }`}
+                >
+                  <img
+                    src={msg.text}
+                    alt="Shared image"
+                    className="w-full h-auto max-h-72 object-cover"
+                    loading="lazy"
+                  />
+                </div>
+              ) : (
+                <div className="px-3.5 py-2.5 rounded-2xl text-sm bg-[#1C1C1E] text-[#777] border border-[#2A2A2A]">
+                  Invalid image data
+                </div>
+              )
             ) : isFile ? (
+              msg.text.startsWith('data:') ? (
               <a
                 href={msg.text}
                 download={msg.file?.name || 'file'}
@@ -3143,6 +3173,11 @@ const MessageItem = memo(function MessageItem({
                   <path d="M3.5 12.75a.75.75 0 0 0-1.5 0v2.5A2.75 2.75 0 0 0 4.75 18h10.5A2.75 2.75 0 0 0 18 15.25v-2.5a.75.75 0 0 0-1.5 0v2.5c0 .69-.56 1.25-1.25 1.25H4.75c-.69 0-1.25-.56-1.25-1.25v-2.5Z" />
                 </svg>
               </a>
+              ) : (
+                <div className="px-3.5 py-2.5 rounded-2xl text-sm bg-[#1C1C1E] text-[#777] border border-[#2A2A2A]">
+                  Invalid file data
+                </div>
+              )
             ) : (
               <div
                 className={`max-w-full px-3.5 py-2.5 rounded-2xl text-sm leading-relaxed break-words shadow-sm ${

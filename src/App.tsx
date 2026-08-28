@@ -60,6 +60,12 @@ function DeviceManager() {
     heartbeat();
     const interval = setInterval(heartbeat, 60000);
     window.addEventListener('beforeunload', setOffline);
+    window.addEventListener('pagehide', setOffline);
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') setOffline();
+      else heartbeat();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
 
     const unsub = onSnapshot(deviceRef, (snap) => {
       if (snap.exists() && snap.data()?.revoked === true) {
@@ -73,6 +79,8 @@ function DeviceManager() {
     return () => {
       clearInterval(interval);
       window.removeEventListener('beforeunload', setOffline);
+      window.removeEventListener('pagehide', setOffline);
+      document.removeEventListener('visibilitychange', onVisibility);
       unsub();
     };
   }, [user, deviceId, setUser, navigate]);

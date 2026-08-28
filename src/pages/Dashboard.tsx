@@ -97,7 +97,7 @@ export default function Dashboard() {
         if (data.autoDelete === true) {
           const last = data.lastActivityAt?.toMillis?.() ?? null;
           if (last === null || Date.now() - last > 3600000) {
-            deleteRoomData(room.code);
+            await deleteRoomData(room.code);
             await localDB.joinedRooms.delete(room.code);
             useStore.getState().removeJoinedRoom(room.code);
           }
@@ -348,7 +348,7 @@ export default function Dashboard() {
         encrypted: true,
         version: 2,
         exportedAt: new Date().toISOString(),
-        salt: b64(salt.buffer),
+        salt: b64(salt.buffer.slice(salt.byteOffset, salt.byteOffset + salt.byteLength)),
         iv,
         ciphertext,
       }, null, 2);
@@ -533,6 +533,9 @@ export default function Dashboard() {
       const snap = await getDocs(q);
       if (snap.empty) return null;
       const data = snap.docs[0].data();
+      if (data.poll) return { text: '[Poll]', timestamp: data.timestamp?.toMillis() ?? Date.now(), senderUid: data.senderUid, senderName: data.senderName || data.senderUid?.slice(0, 6) };
+      if (data.sys) return { text: data.sys?.type ? `[System]` : (data.text || '').slice(0, 40), timestamp: data.timestamp?.toMillis() ?? Date.now(), senderUid: data.senderUid, senderName: data.senderName || data.senderUid?.slice(0, 6) };
+      if (!data.ciphertext || !data.iv) return null;
       const key = await deriveKey(roomCode, data.kv ?? 0);
       const decrypted = await decrypt(data.ciphertext, data.iv, key);
       const parsed = JSON.parse(decrypted);

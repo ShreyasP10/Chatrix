@@ -47,11 +47,17 @@ export function useVoiceCall(roomCode: string | undefined) {
   const remoteAudioRef = useRef<Map<string, HTMLAudioElement>>(new Map());
   const localStreamRef = useRef<MediaStream | null>(null);
   const screenStreamRef = useRef<MediaStream | null>(null);
-  const unsubsRef = useRef<Map<string, () => void>>(new Map());
+  const unsubsRef = useRef<Map<string, (() => void)[]>>(new Map());
   const connectingRef = useRef(false);
   const [screenShareUid, setScreenShareUid] = useState<string | null>(null);
   const [remoteScreens, setRemoteScreens] = useState<{ uid: string; stream: MediaStream }[]>([]);
   const [sharingScreen, setSharingScreen] = useState(false);
+
+  const addUnsub = useCallback((uid: string, fn: () => void) => {
+    const arr = unsubsRef.current.get(uid) ?? [];
+    arr.push(fn);
+    unsubsRef.current.set(uid, arr);
+  }, []);
 
   // Listen for call state changes
   useEffect(() => {
@@ -85,9 +91,21 @@ export function useVoiceCall(roomCode: string | undefined) {
   // Prune remote videos when the sharer changes or stops
   useEffect(() => {
     if (!screenShareUid) {
-      setRemoteScreens((prev) => (prev.length ? [] : prev));
+      setRemoteScreens((prev) => {
+        for (const s of prev) {
+          try { s.stream.getTracks().forEach((t) => t.stop()); } catch {}
+        }
+        return [];
+      });
     } else {
-      setRemoteScreens((prev) => prev.filter((s) => s.uid === screenShareUid));
+      setRemoteScreens((prev) => {
+        const keep = prev.filter((s) => s.uid === screenShareUid);
+        const removed = prev.filter((s) => s.uid !== screenShareUid);
+        for (const s of removed) {
+          try { s.stream.getTracks().forEach((t) => t.stop()); } catch {}
+        }
+        return keep;
+      });
     }
   }, [screenShareUid]);
 
@@ -133,138 +151,35 @@ export function useVoiceCall(roomCode: string | undefined) {
     return unsub;
   }, [roomCode, user, setCallInvitations]);
 
-  // Listen for incoming offers when in call
-  useEffect(() => {
-    if (!roomCode || !user || !inCall || !localStreamRef.current) return;
-
-    const p2pRef = collection(db, 'rooms', roomCode, 'calls', 'current', 'p2p');
-    const unsub = onSnapshot(p2pRef, (snap) => {
-      snap.docChanges().forEach(async (change) => {
-        if (change.type !== 'added' && change.type !== 'modified') return;
-        const data = change.doc.data();
-        if (!data || !data.offer) return;
-
-        const uidA = data.uidA;
-        const uidB = data.uidB;
-        const otherUid = uidA === user.uid ? uidB : uidA;
-        if (!otherUid || otherUid === user.uid) return;
-
-        const existingPc = peersRef.current.get(otherUid);
-
-        // Re-offer (track renegotiation, e.g. screen share): answer if we can
-        if (existingPc && data.offer && !data.answer) {
-          if (
-            existingPc.signalingState === 'stable' &&
-            data.offer !== (existingPc.currentRemoteDescription?.sdp ?? '')
-          ) {
-            try {
-              await existingPc.setRemoteDescription(new RTCSessionDescription(JSON.parse(data.offer)));
-              const answer = await existingPc.createAnswer();
-              answer.sdp = setOpusBitrate(answer.sdp!);
-              await existingPc.setLocalDescription(answer);
-              const pairRef = doc(db, 'rooms', roomCode, 'calls', 'current', 'p2p', change.doc.id);
-              await setDoc(pairRef, { answer: JSON.stringify(existingPc.localDescription) }, { merge: true });
-            } catch {}
-          }
-          return;
-        }
-
-        // If we already have a peer connection, skip
-        if (existingPc) return;
-
-        // Rule: higher UID waits for offer, lower UID creates offer.
-        // If we are the higher UID and there's an offer from the lower UID, answer it.
-        if (user.uid > otherUid && data.offer && !data.answer) {
-          handleOffer(otherUid, data.offer, change.doc.id);
-        }
-      });
-    });
-
-    return () => unsub();
-  }, [roomCode, user, inCall]);
-
-  const createPeerConnection = useCallback(
-    (targetUid: string): RTCPeerConnection | null => {
-      if (!roomCode || !user || !localStreamRef.current) return null;
-      if (peersRef.current.has(targetUid)) return peersRef.current.get(targetUid)!;
-
-      const stream = localStreamRef.current;
-      const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
-
-      stream.getTracks().forEach((track) => {
-        pc.addTrack(track, stream);
-      });
-
-      pc.onicecandidate = (e) => {
-        if (e.candidate && roomCode && user) {
-          const pairId = getPairId(user.uid, targetUid);
-          addDoc(
-            collection(db, 'rooms', roomCode, 'calls', 'current', 'p2p', pairId, 'candidates'),
-            {
-              from: user.uid,
-              to: targetUid,
-              candidate: JSON.stringify(e.candidate),
-            }
-          ).catch(() => {});
-        }
-      };
-
-      pc.ontrack = (e) => {
-        if (!e.streams[0]) return;
-        if (e.track.kind === 'video') {
-          // Screen-share video track
-          setRemoteScreens((prev) => {
-            const next = prev.filter((s) => s.uid !== targetUid);
-            return [...next, { uid: targetUid, stream: e.streams![0] }];
-          });
-          e.track.onended = () => {
-            setRemoteScreens((prev) => prev.filter((s) => s.uid !== targetUid));
-          };
-          return;
-        }
-        let audioEl = remoteAudioRef.current.get(targetUid);
-        if (!audioEl) {
-          audioEl = document.createElement('audio');
-          audioEl.autoplay = true;
-          audioEl.hidden = true;
-          document.body.appendChild(audioEl);
-          remoteAudioRef.current.set(targetUid, audioEl);
-        }
-        audioEl.srcObject = e.streams[0];
-        audioEl.play().catch(() => {});
-      };
-
-      pc.oniceconnectionstatechange = () => {
-        if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
-          cleanupPeer(targetUid);
-        }
-      };
-
-      peersRef.current.set(targetUid, pc);
-      return pc;
-    },
-    [roomCode, user]
-  );
-
   const cleanupPeer = useCallback((targetUid: string) => {
     const pc = peersRef.current.get(targetUid);
     if (pc) {
-      pc.close();
+      try { pc.close(); } catch {}
       peersRef.current.delete(targetUid);
     }
     const audioEl = remoteAudioRef.current.get(targetUid);
     if (audioEl) {
-      audioEl.pause();
-      audioEl.srcObject = null;
-      audioEl.remove();
+      try {
+        audioEl.pause();
+        audioEl.srcObject = null;
+        audioEl.remove();
+      } catch {}
       remoteAudioRef.current.delete(targetUid);
     }
-    const unsub = unsubsRef.current.get(targetUid);
-    if (unsub) {
-      unsub();
+    const arr = unsubsRef.current.get(targetUid);
+    if (arr) {
+      for (const fn of arr) {
+        try { fn(); } catch {}
+      }
       unsubsRef.current.delete(targetUid);
     }
-    setRemoteScreens((prev) => prev.filter((s) => s.uid !== targetUid));
+    setRemoteScreens((prev) => {
+      const removed = prev.filter((s) => s.uid === targetUid);
+      for (const s of removed) {
+        try { s.stream.getTracks().forEach((t) => t.stop()); } catch {}
+      }
+      return prev.filter((s) => s.uid !== targetUid);
+    });
   }, []);
 
   function listenForAnswer(targetUid: string, pairId: string, pc: RTCPeerConnection) {
@@ -279,13 +194,9 @@ export function useVoiceCall(roomCode: string | undefined) {
         } catch {}
       }
     });
-    const existing = unsubsRef.current.get(targetUid);
-    if (existing) {
-      const old = existing;
-      unsubsRef.current.set(targetUid, () => { old(); unsub(); });
-    } else {
-      unsubsRef.current.set(targetUid, unsub);
-    }
+    const arr = unsubsRef.current.get(targetUid) ?? [];
+    arr.push(unsub);
+    unsubsRef.current.set(targetUid, arr);
   }
 
   const renegotiate = useCallback(
@@ -305,6 +216,37 @@ export function useVoiceCall(roomCode: string | undefined) {
     [roomCode, user]
   );
 
+  const stopScreenShare = useCallback(async () => {
+    const stream = screenStreamRef.current;
+    if (stream) {
+      for (const pc of peersRef.current.values()) {
+        const senders = pc.getSenders().filter((s) => s.track && stream.getTracks().includes(s.track!));
+        for (const sender of senders) {
+          try {
+            if (typeof (sender as any).replaceTrack === 'function') {
+              await (sender as any).replaceTrack(null);
+            } else {
+              pc.removeTrack(sender);
+            }
+          } catch {}
+        }
+      }
+      try { stream.getTracks().forEach((t) => t.stop()); } catch {}
+      screenStreamRef.current = null;
+    }
+    setSharingScreen(false);
+    if (roomCode) {
+      try {
+        await updateDoc(doc(db, 'rooms', roomCode, 'calls', 'current'), { screenShareUid: null });
+      } catch {}
+    }
+    for (const [uid, pc] of peersRef.current) {
+      if (pc.signalingState === 'stable') {
+        await renegotiate(uid).catch(() => {});
+      }
+    }
+  }, [roomCode, renegotiate]);
+
   const startScreenShare = useCallback(async (): Promise<boolean> => {
     if (!roomCode || !user) return false;
     try {
@@ -313,7 +255,7 @@ export function useVoiceCall(roomCode: string | undefined) {
       });
       const track = stream.getVideoTracks()[0];
       if (!track) {
-        stream.getTracks().forEach((t) => t.stop());
+        try { stream.getTracks().forEach((t) => t.stop()); } catch {}
         return false;
       }
       screenStreamRef.current = stream;
@@ -323,33 +265,144 @@ export function useVoiceCall(roomCode: string | undefined) {
       }
       await setDoc(doc(db, 'rooms', roomCode, 'calls', 'current'), { screenShareUid: user.uid }, { merge: true });
       setSharingScreen(true);
-      for (const [uid] of peersRef.current) renegotiate(uid);
+      for (const [uid, pc] of peersRef.current) {
+        if (pc.signalingState === 'stable') {
+          await renegotiate(uid).catch(() => {});
+        }
+      }
       return true;
     } catch {
       return false;
     }
-  }, [roomCode, user, renegotiate]);
+  }, [roomCode, user, renegotiate, stopScreenShare]);
 
-  const stopScreenShare = useCallback(async () => {
-    const stream = screenStreamRef.current;
-    if (stream) {
-      for (const pc of peersRef.current.values()) {
-        const sender = pc.getSenders().find((s) => s.track && stream.getTracks().includes(s.track!));
-        if (sender) {
-          try { pc.removeTrack(sender); } catch {}
+  // Listen for incoming offers when in call
+  useEffect(() => {
+    if (!roomCode || !user || !inCall || !localStreamRef.current) return;
+
+    const p2pRef = collection(db, 'rooms', roomCode, 'calls', 'current', 'p2p');
+    const unsub = onSnapshot(p2pRef, (snap) => {
+      for (const change of snap.docChanges()) {
+        if (change.type !== 'added' && change.type !== 'modified') continue;
+        const data = change.doc.data();
+        if (!data || !data.offer) continue;
+
+        const uidA = data.uidA;
+        const uidB = data.uidB;
+        const otherUid = uidA === user.uid ? uidB : uidA;
+        if (!otherUid || otherUid === user.uid) continue;
+
+        const existingPc = peersRef.current.get(otherUid);
+
+        // Re-offer (track renegotiation, e.g. screen share): answer if we can
+        if (existingPc && data.offer && !data.answer) {
+          let offerSdp = '';
+          try { offerSdp = JSON.parse(data.offer).sdp ?? data.offer; } catch { offerSdp = data.offer; }
+          const currentSdp = (() => {
+            try { return (existingPc.currentRemoteDescription as any)?.sdp ?? ''; } catch { return ''; }
+          })();
+          if (
+            existingPc.signalingState === 'stable' &&
+            offerSdp !== currentSdp
+          ) {
+            (async () => {
+              try {
+                await existingPc.setRemoteDescription(new RTCSessionDescription(JSON.parse(data.offer)));
+                const answer = await existingPc.createAnswer();
+                answer.sdp = setOpusBitrate(answer.sdp!);
+                await existingPc.setLocalDescription(answer);
+                const pairRef = doc(db, 'rooms', roomCode, 'calls', 'current', 'p2p', change.doc.id);
+                await setDoc(pairRef, { answer: JSON.stringify(existingPc.localDescription) }, { merge: true });
+              } catch {}
+            })();
+          }
+          continue;
+        }
+
+        if (existingPc) continue;
+
+        // Rule: higher UID waits for offer, lower UID creates offer.
+        // If we are the higher UID and there's an offer from the lower UID, answer it.
+        if (user.uid > otherUid && data.offer && !data.answer) {
+          handleOffer(otherUid, data.offer, change.doc.id);
         }
       }
-      stream.getTracks().forEach((t) => t.stop());
-      screenStreamRef.current = null;
-    }
-    setSharingScreen(false);
-    if (roomCode) {
-      try {
-        await updateDoc(doc(db, 'rooms', roomCode, 'calls', 'current'), { screenShareUid: null });
-      } catch {}
-    }
-    for (const [uid] of peersRef.current) renegotiate(uid);
-  }, [roomCode, renegotiate]);
+    });
+
+    return () => unsub();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [roomCode, user, inCall]);
+
+  const createPeerConnection = useCallback(
+    (targetUid: string): RTCPeerConnection | null => {
+      if (!roomCode || !user || !localStreamRef.current) return null;
+      if (peersRef.current.has(targetUid)) return peersRef.current.get(targetUid)!;
+
+      const stream = localStreamRef.current;
+      const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+
+      stream.getTracks().forEach((track) => {
+        try { pc.addTrack(track, stream); } catch {}
+      });
+      // Also add current screen share track if we are sharing
+      if (screenStreamRef.current) {
+        for (const t of screenStreamRef.current.getVideoTracks()) {
+          try { pc.addTrack(t, screenStreamRef.current!); } catch {}
+        }
+      }
+
+      pc.onicecandidate = (e) => {
+        if (e.candidate && roomCode && user) {
+          const pairId = getPairId(user.uid, targetUid);
+          addDoc(
+            collection(db, 'rooms', roomCode, 'calls', 'current', 'p2p', pairId, 'candidates'),
+            {
+              from: user.uid,
+              to: targetUid,
+              candidate: JSON.stringify(e.candidate),
+            }
+          ).catch(() => {});
+        }
+      };
+
+      pc.ontrack = (e) => {
+        const track = e.track;
+        const stream = e.streams[0] ?? new MediaStream([track]);
+        if (track.kind === 'video') {
+          setRemoteScreens((prev) => {
+            const next = prev.filter((s) => s.uid !== targetUid);
+            return [...next, { uid: targetUid, stream }];
+          });
+          track.onended = () => {
+            setRemoteScreens((prev) => prev.filter((s) => s.uid !== targetUid));
+          };
+          track.onmute = () => {};
+          return;
+        }
+        let audioEl = remoteAudioRef.current.get(targetUid);
+        if (!audioEl) {
+          audioEl = document.createElement('audio');
+          audioEl.autoplay = true;
+          (audioEl as any).playsInline = true;
+          audioEl.hidden = true;
+          document.body.appendChild(audioEl);
+          remoteAudioRef.current.set(targetUid, audioEl);
+        }
+        audioEl.srcObject = stream;
+        audioEl.play().catch(() => {});
+      };
+
+      pc.oniceconnectionstatechange = () => {
+        if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
+          cleanupPeer(targetUid);
+        }
+      };
+
+      peersRef.current.set(targetUid, pc);
+      return pc;
+    },
+    [roomCode, user, cleanupPeer]
+  );
 
   const handleOffer = useCallback(
     async (fromUid: string, offerSdp: string, _pairId?: string) => {
@@ -401,7 +454,6 @@ export function useVoiceCall(roomCode: string | undefined) {
           answer: null,
         });
 
-        // Listen for answer
         const unsub = onSnapshot(pairRef, (snap) => {
           if (!snap.exists()) return;
           const data = snap.data();
@@ -411,12 +463,12 @@ export function useVoiceCall(roomCode: string | undefined) {
             } catch {}
           }
         });
-        unsubsRef.current.set(targetUid, unsub);
+        addUnsub(targetUid, unsub);
 
         listenForCandidates(targetUid, pairId, pc);
       } catch {}
     },
-    [roomCode, user, createPeerConnection]
+    [roomCode, user, createPeerConnection, addUnsub]
   );
 
   function listenForCandidates(fromUid: string, pairId: string, pc: RTCPeerConnection) {
@@ -434,14 +486,7 @@ export function useVoiceCall(roomCode: string | undefined) {
         } catch {}
       }
     });
-    // Store cleanup alongside existing unsub (don't override)
-    const existing = unsubsRef.current.get(fromUid);
-    if (existing) {
-      const old = existing;
-      unsubsRef.current.set(fromUid, () => { old(); unsub(); });
-    } else {
-      unsubsRef.current.set(fromUid, unsub);
-    }
+    addUnsub(fromUid, unsub);
   }
 
   // Connect to existing participants when joining or when new participants appear
@@ -459,23 +504,32 @@ export function useVoiceCall(roomCode: string | undefined) {
   useEffect(() => {
     if (!inCall) return;
     let wakeLock: any = null;
-    try {
-      (navigator as any).wakeLock?.request?.('screen')
-        .then((lock: any) => { wakeLock = lock; })
-        .catch(() => {});
-    } catch {}
+    let released = false;
+    const requestLock = async () => {
+      if (released || document.hidden) return;
+      try {
+        if (wakeLock) {
+          try { await wakeLock.release(); } catch {}
+          wakeLock = null;
+        }
+        wakeLock = await (navigator as any).wakeLock?.request?.('screen');
+      } catch {}
+    };
+    requestLock();
     swSend({ type: 'CALL_ACTIVE', roomCode });
     const onVisibility = () => {
       if (document.visibilityState === 'visible') {
-        try {
-          (navigator as any).wakeLock?.request?.('screen').then((lock: any) => { wakeLock = lock; }).catch(() => {});
-        } catch {}
+        requestLock();
       }
     };
     document.addEventListener('visibilitychange', onVisibility);
     return () => {
+      released = true;
       document.removeEventListener('visibilitychange', onVisibility);
-      try { wakeLock?.release?.().catch(() => {}); } catch {}
+      if (wakeLock) {
+        try { wakeLock.release().catch(() => {}); } catch {}
+        wakeLock = null;
+      }
       swSend({ type: 'CALL_IDLE' });
     };
   }, [inCall, roomCode]);
@@ -530,25 +584,32 @@ export function useVoiceCall(roomCode: string | undefined) {
   }, [roomCode, user, micEnabled, setInCall]);
 
   const leaveCall = useCallback(async () => {
-    for (const [uid] of peersRef.current) {
+    for (const [uid] of peersRef.current.keys()) {
       cleanupPeer(uid);
     }
 
     if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach((t) => t.stop());
+      try { localStreamRef.current.getTracks().forEach((t) => t.stop()); } catch {}
       localStreamRef.current = null;
     }
     if (screenStreamRef.current) {
-      screenStreamRef.current.getTracks().forEach((t) => t.stop());
+      try { screenStreamRef.current.getTracks().forEach((t) => t.stop()); } catch {}
       screenStreamRef.current = null;
     }
     setSharingScreen(false);
-    setRemoteScreens([]);
+    setRemoteScreens((prev) => {
+      for (const s of prev) {
+        try { s.stream.getTracks().forEach((t) => t.stop()); } catch {}
+      }
+      return [];
+    });
 
-    for (const [, audioEl] of remoteAudioRef.current) {
-      audioEl.pause();
-      audioEl.srcObject = null;
-      audioEl.remove();
+    for (const audioEl of remoteAudioRef.current.values()) {
+      try {
+        audioEl.pause();
+        (audioEl as any).srcObject = null;
+        audioEl.remove();
+      } catch {}
     }
     remoteAudioRef.current.clear();
 
@@ -559,25 +620,33 @@ export function useVoiceCall(roomCode: string | undefined) {
 
     await deleteParticipantDoc(roomCode, user.uid);
 
-    const remainingSnap = await getDocs(
-      collection(db, 'rooms', roomCode, 'calls', 'current', 'participants')
-    );
-    if (remainingSnap.empty) {
-      await deleteDoc(doc(db, 'rooms', roomCode, 'calls', 'current')).catch(() => {});
-    }
+    try {
+      const remainingSnap = await getDocs(
+        collection(db, 'rooms', roomCode, 'calls', 'current', 'participants')
+      );
+      if (remainingSnap.empty) {
+        await deleteDoc(doc(db, 'rooms', roomCode, 'calls', 'current')).catch(() => {});
+      } else if (remainingSnap.size === 0) {
+        await deleteDoc(doc(db, 'rooms', roomCode, 'calls', 'current')).catch(() => {});
+      }
+    } catch {}
   }, [roomCode, user, cleanupPeer, setInCall, setMicEnabled]);
 
   const toggleMute = useCallback(async () => {
     const stream = localStreamRef.current;
     if (!stream || !roomCode || !user) return;
-    const enabled = !stream.getAudioTracks()[0].enabled;
-    stream.getAudioTracks().forEach((t) => (t.enabled = enabled));
+    const track = stream.getAudioTracks()[0];
+    if (!track) return;
+    const enabled = !track.enabled;
+    try { stream.getAudioTracks().forEach((t) => (t.enabled = enabled)); } catch {}
     setMicEnabled(enabled);
-    await setDoc(
-      doc(db, 'rooms', roomCode, 'calls', 'current', 'participants', user.uid),
-      { muted: !enabled },
-      { merge: true }
-    );
+    try {
+      await setDoc(
+        doc(db, 'rooms', roomCode, 'calls', 'current', 'participants', user.uid),
+        { muted: !enabled },
+        { merge: true }
+      );
+    } catch {}
   }, [roomCode, user, setMicEnabled]);
 
   const inviteMember = useCallback(
@@ -603,29 +672,38 @@ export function useVoiceCall(roomCode: string | undefined) {
     setCallInvitations([]);
   }, [setCallInvitations]);
 
-  // Full cleanup on unmount
+  // Full cleanup on unmount - do not call setState on unmounted component
   useEffect(() => {
     return () => {
-      for (const [uid] of peersRef.current) {
-        cleanupPeer(uid);
+      for (const pc of peersRef.current.values()) {
+        try { pc.close(); } catch {}
       }
+      peersRef.current.clear();
       if (localStreamRef.current) {
-        localStreamRef.current.getTracks().forEach((t) => t.stop());
+        try { localStreamRef.current.getTracks().forEach((t) => t.stop()); } catch {}
         localStreamRef.current = null;
       }
       if (screenStreamRef.current) {
-        screenStreamRef.current.getTracks().forEach((t) => t.stop());
+        try { screenStreamRef.current.getTracks().forEach((t) => t.stop()); } catch {}
         screenStreamRef.current = null;
       }
-      for (const [, audioEl] of remoteAudioRef.current) {
-        audioEl.pause();
-        audioEl.srcObject = null;
-        audioEl.remove();
+      for (const audioEl of remoteAudioRef.current.values()) {
+        try {
+          audioEl.pause();
+          (audioEl as any).srcObject = null;
+          audioEl.remove();
+        } catch {}
       }
       remoteAudioRef.current.clear();
-      setInCall(false);
+      for (const arr of unsubsRef.current.values()) {
+        for (const fn of arr) {
+          try { fn(); } catch {}
+        }
+      }
+      unsubsRef.current.clear();
     };
-  }, [cleanupPeer, setInCall]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return {
     callState,

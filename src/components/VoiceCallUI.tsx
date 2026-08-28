@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import type { CallState, CallParticipant, CallInvitation } from '../types';
 import InviteToCall from './InviteToCall';
 
@@ -19,6 +19,20 @@ interface Props {
   remoteScreens: { uid: string; stream: MediaStream }[];
   onStartScreenShare: () => Promise<boolean>;
   onStopScreenShare: () => void;
+}
+
+function ScreenVideo({ stream }: { stream: MediaStream }) {
+  const ref = useRef<HTMLVideoElement>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.srcObject = stream;
+    el.play().catch(() => {});
+    return () => {
+      try { el.srcObject = null; } catch {}
+    };
+  }, [stream]);
+  return <video ref={ref} autoPlay playsInline muted className="w-full max-h-[38vh] bg-black object-contain" />;
 }
 
 export default function VoiceCallUI({
@@ -44,7 +58,6 @@ export default function VoiceCallUI({
 
   if (!callState || !callState.active) return null;
 
-  // Not in call yet – show join banner
   if (!inCall) {
     return (
       <>
@@ -68,37 +81,32 @@ export default function VoiceCallUI({
   const sharerName = screenShareUid
     ? callParticipants.find((p) => p.uid === screenShareUid)?.name || 'A member'
     : null;
-  const videoCount = remoteScreens.length;
 
-  // In call – show Discord-style bar
   return (
     <>
-      {remoteScreens.map((s) => (
-        <div key={s.uid} className="fixed bottom-20 left-0 right-0 z-40 px-4">
-          <div className="max-w-md md:max-w-lg lg:max-w-xl mx-auto">
-            <div className="rounded-2xl overflow-hidden border border-[#333] bg-black shadow-2xl">
-              <div className="flex items-center justify-between px-3 py-1.5 bg-[#0D0D0D]">
-                <span className="text-[11px] text-[#ccc] font-medium flex items-center gap-1.5">
-                  <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
-                  {callParticipants.find((p) => p.uid === s.uid)?.name || 'A member'} is sharing screen
-                </span>
+      {remoteScreens.length > 0 && (
+        <div className="fixed bottom-20 left-0 right-0 z-40 px-4">
+          <div className="max-w-md md:max-w-lg lg:max-w-xl mx-auto space-y-2">
+            {remoteScreens.map((s) => (
+              <div key={s.uid} className="rounded-2xl overflow-hidden border border-[#333] bg-black shadow-2xl">
+                <div className="flex items-center justify-between px-3 py-1.5 bg-[#0D0D0D]">
+                  <span className="text-[11px] text-[#ccc] font-medium flex items-center gap-1.5">
+                    <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
+                    {callParticipants.find((p) => p.uid === s.uid)?.name || 'A member'} is sharing screen
+                  </span>
+                </div>
+                <ScreenVideo stream={s.stream} />
               </div>
-              <video
-                autoPlay
-                playsInline
-                className="w-full max-h-[38vh] bg-black object-contain"
-                ref={(el) => { if (el && el.srcObject !== s.stream) el.srcObject = s.stream; }}
-              />
-            </div>
+            ))}
           </div>
         </div>
-      ))}
-      {videoCount === 0 && sharerName && (
+      )}
+      {remoteScreens.length === 0 && sharerName && (
         <div className="fixed bottom-20 left-0 right-0 z-40 px-4">
           <div className="max-w-md md:max-w-lg lg:max-w-xl mx-auto">
             <div className="rounded-2xl border border-[#333] bg-[#0D0D0D] px-4 py-3 shadow-2xl flex items-center gap-2.5">
               <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
-              <span className="text-xs text-[#ccc]">{sharerName} is sharing screen — wait for the stream...</span>
+              <span className="text-xs text-[#ccc]">{sharerName} is sharing screen — waiting for stream...</span>
             </div>
           </div>
         </div>
@@ -154,6 +162,7 @@ export default function VoiceCallUI({
                   } else {
                     const ok = await onStartScreenShare();
                     setSharingError(!ok);
+                    if (!ok) setTimeout(() => setSharingError(false), 3000);
                   }
                 }}
                 className={`p-2 rounded-lg transition-all ${

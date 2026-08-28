@@ -10,10 +10,10 @@ import { AccessToken } from 'livekit-server-sdk';
 initializeApp();
 
 const livekitSecret = defineSecret('LIVEKIT_SECRET');
-const LIVEKIT_API_KEY = 'mykey';
+const livekitApiKey = defineSecret('LIVEKIT_API_KEY');
 
 export const getLiveKitToken = onCall(
-  { secrets: [livekitSecret], cors: true },
+  { secrets: [livekitSecret, livekitApiKey], cors: true },
   async (request) => {
     const { roomName, participantName, uid, ttl } = request.data as {
       roomName: string;
@@ -27,7 +27,7 @@ export const getLiveKitToken = onCall(
     }
 
     const host = process.env.LIVEKIT_HOST || 'wss://localhost:7880';
-    const at = new AccessToken(LIVEKIT_API_KEY, livekitSecret.value(), {
+    const at = new AccessToken(livekitApiKey.value(), livekitSecret.value(), {
       identity: uid,
       name: participantName,
       ttl: ttl ?? '1h',

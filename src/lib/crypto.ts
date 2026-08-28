@@ -80,7 +80,7 @@ export async function decrypt(
  * Derive an AES key from a user-supplied backup password.
  * The random salt is stored with the backup so restore can re-derive the key.
  */
-export async function derivePasswordKey(password: string, salt: Uint8Array<ArrayBuffer>): Promise<CryptoKey> {
+export async function derivePasswordKey(password: string, salt: BufferSource): Promise<CryptoKey> {
   const keyMaterial = await crypto.subtle.importKey(
     'raw',
     new TextEncoder().encode(password),

@@ -31,9 +31,6 @@ export default defineConfig({
           { name: 'New Room', short_name: 'New Room', url: '/?new=1', icons: [{ src: '/icons/icon-192.png', sizes: '192x192', type: 'image/png' }] },
         ],
       },
-      workbox: {
-        globPatterns: ['**/*.{js,css,html,svg,png,ico,json}'],
-      },
       injectManifest: {
         globPatterns: ['**/*.{js,css,html,svg,png,ico,json}'],
       },
