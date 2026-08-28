@@ -1477,13 +1477,16 @@ export default function ChatScreen() {
         )}
 
         {hasMore && !loading && messages.length >= PAGE_SIZE && (
-          <button
-            onClick={loadOlder}
-            disabled={loadingOlder}
-            className="w-full text-xs text-[#555] py-3 hover:text-white transition-colors disabled:opacity-40"
-          >
-            {loadingOlder ? 'Loading...' : 'Load older'}
-          </button>
+          <div className="sticky top-0 z-10 flex justify-center py-2 bg-gradient-to-b from-black/80 to-transparent backdrop-blur-[2px]">
+            <button
+              onClick={loadOlder}
+              disabled={loadingOlder}
+              className="px-4 py-1.5 rounded-full bg-[#1C1C1E] border border-[#333] text-xs font-medium text-[#ccc] hover:bg-[#252525] hover:text-white hover:border-[#555] transition-all disabled:opacity-40 flex items-center gap-1.5 shadow-lg"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5"><path fillRule="evenodd" d="M9.78 4.22a.75.75 0 0 1 0 1.06L5.56 9.5h8.69a.75.75 0 0 1 0 1.5H5.56l4.22 4.22a.75.75 0 1 1-1.06 1.06l-5.5-5.5a.75.75 0 0 1 0-1.06l5.5-5.5a.75.75 0 0 1 1.06 0Z" clipRule="evenodd" /></svg>
+              {loadingOlder ? 'Loading...' : `Load older · ${messages.length} loaded`}
+            </button>
+          </div>
         )}
 
         {!loading && messages.length === 0 && (
@@ -3740,18 +3743,23 @@ const MessageItem = memo(function MessageItem({
 
           {isOwn && (msg.readerUids ?? []).length > 0 && (
             <div
-              className="mt-1 flex flex-row items-center justify-end gap-1"
-              title={`Seen by ${msg.readerUids!.map(resolveName).join(', ')}`}
+              className="mt-1 flex flex-row items-center justify-end gap-1.5"
+              title={`Seen by ${msg.readerUids!.map((uid) => resolveName(uid) || uid.slice(0, 6)).join(', ')}`}
             >
+              <span className="text-[10px] text-[#555] hidden sm:inline">Seen</span>
               <div className="flex flex-row items-center -space-x-1.5 flex-nowrap">
-                {msg.readerUids!.slice(0, 5).map((uid) => (
-                  <div key={uid} className="rounded-full ring-2 ring-black overflow-hidden shrink-0">
-                    <Avatar name={resolveName(uid) || uid.slice(0, 6)} size="xs" />
-                  </div>
-                ))}
+                {msg.readerUids!.slice(0, 5).map((uid) => {
+                  const av = avatarFor(uid);
+                  const name = resolveName(uid) || uid.slice(0, 6);
+                  return (
+                    <div key={uid} className="rounded-full ring-2 ring-black overflow-hidden shrink-0" title={name}>
+                      <Avatar name={name} size="xs" emoji={av?.emoji} color={av?.color} />
+                    </div>
+                  );
+                })}
               </div>
               {msg.readerUids!.length > 5 && (
-                <span className="text-[9px] text-[#555] ml-1">+{msg.readerUids!.length - 5}</span>
+                <span className="text-[10px] text-[#777]">+{msg.readerUids!.length - 5}</span>
               )}
             </div>
           )}
