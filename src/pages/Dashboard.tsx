@@ -817,15 +817,30 @@ export default function Dashboard() {
               Your Rooms
             </h2>
             <span className="text-[10px] text-[#333] font-mono ml-auto">
-              {joinedRooms.length}
+              {joinedRooms.filter((r) => !r.archived).length}
             </span>
           </div>
           <div className="space-y-1">
-            {[...joinedRooms].reverse().map((room) => (
+            {[...joinedRooms].filter((r) => !r.archived).sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned)).map((room) => (
               <RoomItem
                 key={room.code}
                 room={room}
                 onEnter={() => navigate(`/chat/${room.code}`)}
+                onTogglePin={async () => {
+                  const updated = { ...room, pinned: !room.pinned };
+                  await localDB.joinedRooms.put(updated);
+                  setJoinedRooms(joinedRooms.map((r) => r.code === room.code ? updated : r));
+                }}
+                onArchive={async () => {
+                  const updated = { ...room, archived: true };
+                  await localDB.joinedRooms.put(updated);
+                  setJoinedRooms(joinedRooms.map((r) => r.code === room.code ? updated : r));
+                }}
+                onToggleDnd={async () => {
+                  const updated = { ...room, dnd: !room.dnd };
+                  await localDB.joinedRooms.put(updated);
+                  setJoinedRooms(joinedRooms.map((r) => r.code === room.code ? updated : r));
+                }}
                 onDelete={() => {
                   localDB.joinedRooms.delete(room.code);
                   removeJoinedRoom(room.code);
@@ -836,6 +851,21 @@ export default function Dashboard() {
               />
             ))}
           </div>
+          {joinedRooms.some((r) => r.archived) && (
+            <div className="mt-6">
+              <h3 className="text-[10px] text-[#555] uppercase tracking-wider mb-2 px-1">Archived · {joinedRooms.filter((r) => r.archived).length}</h3>
+              <div className="space-y-1 opacity-60">
+                {joinedRooms.filter((r) => r.archived).map((room) => (
+                  <div key={room.code} className="flex items-center gap-2">
+                    <div className="flex-1">
+                      <RoomItem room={room} onEnter={() => navigate(`/chat/${room.code}`)} onDelete={() => { localDB.joinedRooms.delete(room.code); removeJoinedRoom(room.code); }} getLastMessage={getLastMessage} />
+                    </div>
+                    <button onClick={async () => { const u = { ...room, archived: false }; await localDB.joinedRooms.put(u); setJoinedRooms(joinedRooms.map((r) => r.code === room.code ? u : r)); }} className="text-[11px] text-[#007AFF] px-2 py-1 rounded-lg bg-[#007AFF]/10">Unarchive</button>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -1085,11 +1115,17 @@ function RoomItem({
   room,
   onEnter,
   onDelete,
+  onTogglePin,
+  onArchive,
+  onToggleDnd,
   getLastMessage,
 }: {
   room: JoinedRoom;
   onEnter: () => void;
   onDelete: () => void;
+  onTogglePin?: () => void;
+  onArchive?: () => void;
+  onToggleDnd?: () => void;
   getLastMessage: (code: string) => Promise<{ text: string; timestamp: number; senderUid: string; senderName: string } | null>;
 }) {
   const [preview, setPreview] = useState<{ text: string; timestamp: number; senderUid: string; senderName: string } | null>(null);
@@ -1253,10 +1289,27 @@ function RoomItem({
         </p>
       </div>
       <div className="flex items-center gap-1">
-        {unread > 0 && (
+        {unread > 0 && !room.dnd && (
           <span className="min-w-5 h-5 px-1.5 rounded-full bg-[#007AFF] text-white text-[10px] font-bold flex items-center justify-center shrink-0">
             {unread >= 200 ? '200+' : unread}
           </span>
+        )}
+        {room.dnd && <span className="text-[11px]">🔕</span>}
+        {room.pinned && <span className="text-[11px]">📌</span>}
+        {onTogglePin && (
+          <button onClick={(e) => { e.stopPropagation(); onTogglePin(); }} className={`p-1 rounded-lg hover:bg-white/5 ${room.pinned ? 'text-[#FFD700]' : 'text-[#333] hover:text-white'} opacity-0 group-hover:opacity-100 transition-all`} title={room.pinned ? 'Unpin' : 'Pin'}>
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5"><path d="M9.038 2.356a.75.75 0 0 0-.924 0L2.12 6.21a.75.75 0 0 0-.07 1.268l2.18 1.733-.869 3.52a.75.75 0 0 0 1.07.865L10 14.219l5.57 2.373a.75.75 0 0 0 1.07-.865l-.869-3.52 2.18-1.733a.75.75 0 0 0-.07-1.268L10.962 2.356a.75.75 0 0 0-.924 0Z" /></svg>
+          </button>
+        )}
+        {onToggleDnd && (
+          <button onClick={(e) => { e.stopPropagation(); onToggleDnd(); }} className={`p-1 rounded-lg hover:bg-white/5 ${room.dnd ? 'text-[#FF9500]' : 'text-[#333] hover:text-white'} opacity-0 group-hover:opacity-100 transition-all`} title={room.dnd ? 'Unmute' : 'Mute'}>
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5"><path d="M10 3a.75.75 0 0 1 .75.75v1.5a.75.75 0 0 1-1.5 0v-1.5A.75.75 0 0 1 10 3ZM5.06 8.464a.75.75 0 0 1 1.06 0l.708.707a.75.75 0 0 1-1.06 1.06l-.708-.707a.75.75 0 0 1 0-1.06Zm8.485 0a.75.75 0 0 1 0 1.06l-.707.708a.75.75 0 1 1-1.06-1.06l.707-.708a.75.75 0 0 1 1.06 0ZM10 6a4 4 0 0 1 4 4v2.379l1.13 1.129a.75.75 0 1 1-1.06 1.06L8.94 9.44 10 8.38V10a2 2 0 0 0 2 2h.25a.75.75 0 0 1 0 1.5H10a3.5 3.5 0 0 1-3.5-3.5V10a4 4 0 0 1 4-4Z" /><path d="M4.22 4.22a.75.75 0 0 1 1.06 0l12 12a.75.75 0 1 1-1.06 1.06l-12-12a.75.75 0 0 1 0-1.06Z" /></svg>
+          </button>
+        )}
+        {onArchive && !room.archived && (
+          <button onClick={(e) => { e.stopPropagation(); onArchive(); }} className="p-1 rounded-lg hover:bg-white/5 text-[#333] hover:text-white opacity-0 group-hover:opacity-100 transition-all" title="Archive">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5"><path d="M3.5 3A1.5 1.5 0 0 0 2 4.5v11A1.5 1.5 0 0 0 3.5 17h13a1.5 1.5 0 0 0 1.5-1.5v-11A1.5 1.5 0 0 0 16.5 3h-13ZM4 5.5V4.5a.5.5 0 0 1 .5-.5h11a.5.5 0 0 1 .5.5v1H4Zm13 2v7a.5.5 0 0 1-.5.5h-13a.5.5 0 0 1-.5-.5v-7h14Z" /></svg>
+          </button>
         )}
         <button
           onClick={(e) => { e.stopPropagation(); onDelete(); }}
