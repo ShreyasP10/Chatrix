@@ -22,6 +22,14 @@ interface AppState {
   setCallInvitations: (v: CallInvitation[]) => void;
   micEnabled: boolean;
   setMicEnabled: (v: boolean) => void;
+  mutedUids: string[];
+  toggleMuteUid: (uid: string) => void;
+  fontSize: number;
+  setFontSize: (n: number) => void;
+  reducedMotion: boolean;
+  setReducedMotion: (v: boolean) => void;
+  dataSaver: boolean;
+  setDataSaver: (v: boolean) => void;
 }
 
 export const useStore = create<AppState>((set) => ({
@@ -56,4 +64,16 @@ export const useStore = create<AppState>((set) => ({
   setCallInvitations: (v) => set({ callInvitations: v }),
   micEnabled: true,
   setMicEnabled: (v) => set({ micEnabled: v }),
+  mutedUids: JSON.parse(localStorage.getItem('chatrix_muted') || '[]'),
+  toggleMuteUid: (uid) => set((state) => {
+    const muted = state.mutedUids.includes(uid) ? state.mutedUids.filter((u) => u !== uid) : [...state.mutedUids, uid];
+    localStorage.setItem('chatrix_muted', JSON.stringify(muted));
+    return { mutedUids: muted };
+  }),
+  fontSize: parseInt(localStorage.getItem('chatrix_fontSize') || '14', 10),
+  setFontSize: (n) => { localStorage.setItem('chatrix_fontSize', String(n)); set({ fontSize: n }); },
+  reducedMotion: localStorage.getItem('chatrix_reduced') === '1',
+  setReducedMotion: (v) => { localStorage.setItem('chatrix_reduced', v ? '1' : '0'); set({ reducedMotion: v }); },
+  dataSaver: localStorage.getItem('chatrix_dataSaver') === '1',
+  setDataSaver: (v) => { localStorage.setItem('chatrix_dataSaver', v ? '1' : '0'); set({ dataSaver: v }); },
 }));

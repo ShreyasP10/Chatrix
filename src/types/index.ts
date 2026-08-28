@@ -14,6 +14,10 @@ export interface JoinedRoom {
   joinedAt: number;
   lastReadTimestamp: number | null;
   tone?: 'pop' | 'ding' | 'soft' | 'none';
+  archived?: boolean;
+  pinned?: boolean;
+  dnd?: boolean;
+  themeAccent?: string;
 }
 
 export interface ReplyTo {
@@ -46,7 +50,9 @@ export interface DecryptedMessage {
   file?: FileInfo;
   replyTo?: ReplyTo;
   edited?: boolean;
+  editHistory?: { text: string; editedAt: number }[];
   deleted?: boolean;
+  forwarded?: boolean;
   reactions?: Record<string, string[]>;
   poll?: PollData;
   sys?: SysData;
@@ -168,6 +174,9 @@ export interface RoomSettings {
   createdAt: number;
   blurWords: string[];
   effectWords: string[];
+  linkPreviews?: boolean;
+  themeAccent?: string;
+  themeWallpaper?: string;
 }
 
 export interface DeviceInfo {

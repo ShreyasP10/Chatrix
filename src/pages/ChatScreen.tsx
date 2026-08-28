@@ -40,7 +40,10 @@ export default function ChatScreen() {
   const { code } = useParams<{ code: string }>();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const { user, messages, setMessages, callInvitations } = useStore();
+  const { user, messages, setMessages, callInvitations, mutedUids, toggleMuteUid } = useStore();
+  const fontSize = useStore((s) => s.fontSize);
+  const reducedMotion = useStore((s) => s.reducedMotion);
+  const dataSaver = useStore((s) => s.dataSaver);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -67,6 +70,11 @@ export default function ChatScreen() {
   const [showShare, setShowShare] = useState(false);
   const [inviteLink, setInviteLink] = useState('');
   const [toast, setToast] = useState('');
+  const [forwardMsg, setForwardMsg] = useState<DecryptedMessage | null>(null);
+  const [historyMsg, setHistoryMsg] = useState<DecryptedMessage | null>(null);
+  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [showCommandPalette, setShowCommandPalette] = useState(false);
   const [roomReady, setRoomReady] = useState(false);
 
   const [roomName, setRoomName] = useState('');
@@ -127,6 +135,104 @@ export default function ChatScreen() {
     useStore.getState().setCallParticipants([]);
     useStore.getState().setCallInvitations([]);
   }, [code]);
+
+  // ── New feature handlers ──
+  const forwardMessage = async (targetCode: string) => {
+    if (!forwardMsg || !user || !code) return;
+    try {
+      const targetKey = await deriveKey(targetCode, 0);
+      const payload: any = { text: forwardMsg.text, type: forwardMsg.type || 'text', forwarded: true };
+      if (forwardMsg.file) payload.file = forwardMsg.file;
+      const { ciphertext, iv } = await encrypt(JSON.stringify(payload), targetKey);
+      await addDoc(collection(db, 'rooms', targetCode, 'messages'), {
+        senderUid: user.uid,
+        senderName: user.name,
+        ciphertext,
+        iv,
+        timestamp: serverTimestamp(),
+        seq: Date.now(),
+        kv: 0,
+      });
+      showToast(`Forwarded to #${targetCode}`);
+      setForwardMsg(null);
+    } catch { showToast('Forward failed'); }
+  };
+
+  const toggleMute = (uid: string) => {
+    toggleMuteUid(uid);
+    showToast(mutedUids.includes(uid) ? 'Unmuted' : 'Muted');
+  };
+
+  const reportMessage = async (msg: DecryptedMessage) => {
+    if (!code || !user) return;
+    try {
+      await addDoc(collection(db, 'rooms', code, 'reports'), {
+        msgId: msg.id,
+        reportedUid: msg.senderUid,
+        reporterUid: user.uid,
+        text: msg.text.slice(0, 200),
+        timestamp: serverTimestamp(),
+      });
+      await addDoc(collection(db, 'rooms', code, 'audit'), {
+        type: 'report',
+        actorUid: user.uid,
+        actorName: user.name,
+        targetUid: msg.senderUid,
+        msgId: msg.id,
+        timestamp: serverTimestamp(),
+      });
+      showToast('Reported');
+    } catch { showToast('Report failed'); }
+  };
+
+  const startTranscription = () => {
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) { showToast('Speech not supported'); return; }
+    const rec = new SpeechRecognition();
+    rec.lang = 'en-US';
+    rec.interimResults = false;
+    rec.onstart = () => setIsTranscribing(true);
+    rec.onend = () => setIsTranscribing(false);
+    rec.onresult = (e: any) => {
+      const transcript = e.results[0][0].transcript;
+      setInput((prev) => prev ? prev + ' ' + transcript : transcript);
+    };
+    rec.onerror = () => setIsTranscribing(false);
+    try { rec.start(); } catch {}
+  };
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setShowCommandPalette((v) => !v);
+      }
+      if (e.key === 'Escape') {
+        setShowCommandPalette(false);
+        setLightboxSrc(null);
+        setForwardMsg(null);
+        setHistoryMsg(null);
+      }
+      if (e.key === '/' && !showCommandPalette && (e.target as HTMLElement)?.tagName !== 'INPUT') {
+        e.preventDefault();
+        setShowCommandPalette(true);
+      }
+      if (e.key === 'ArrowUp' && !input && !editingId && messages.length > 0) {
+        const lastOwn = [...messages].reverse().find((m) => m.senderUid === user?.uid);
+        if (lastOwn) handleEdit(lastOwn);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [input, editingId, messages, user]);
+
+  useEffect(() => {
+    (window as any).chatrixForward = (msg: DecryptedMessage) => setForwardMsg(msg);
+    (window as any).chatrixMute = (uid: string) => toggleMute(uid);
+    (window as any).chatrixReport = (msg: DecryptedMessage) => reportMessage(msg);
+    (window as any).chatrixHistory = (msg: DecryptedMessage) => setHistoryMsg(msg);
+    (window as any).chatrixLightbox = (src: string) => setLightboxSrc(src);
+  }, [mutedUids]);
 
   useEffect(() => {
     if (!code) return;
@@ -714,6 +820,13 @@ export default function ChatScreen() {
 
       if (editingId) {
         msgData.edited = true;
+        try {
+          const snap = await getDoc(doc(db, 'rooms', code, 'messages', editingId));
+          const prevHistory = snap.data()?.editHistory || [];
+          const orig2 = messages.find((m) => m.id === editingId);
+          const prevText = orig2?.text || '';
+          msgData.editHistory = [...prevHistory, { text: prevText, editedAt: Date.now() }];
+        } catch {}
         await updateDoc(doc(db, 'rooms', code, 'messages', editingId), msgData);
         setEditingId(null);
       } else {
@@ -1126,7 +1239,7 @@ export default function ChatScreen() {
       let dataUrl = await fileToDataUrl(file);
       if (dataUrl.length > MAX_FILE_SIZE) {
         if (file.type.startsWith('image/')) {
-          dataUrl = await compressImage(dataUrl, 800);
+          dataUrl = await compressImage(dataUrl, dataSaver ? 400 : 800);
         }
         if (dataUrl.length > MAX_FILE_SIZE) {
           alert(`File too large. Maximum size is ~${Math.round(MAX_FILE_SIZE / 1000)}KB.`);
@@ -1195,6 +1308,8 @@ export default function ChatScreen() {
     }
     return map;
   }, [messages]);
+
+  const visibleMessages = useMemo(() => messages.filter((m) => !mutedUids.includes(m.senderUid)), [messages, mutedUids]);
 
   const schedulePresets = useMemo(() => {
     const tonight = new Date();
@@ -1328,7 +1443,7 @@ export default function ChatScreen() {
         </div>
       )}
 
-      <div ref={messagesRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-1 scroll-smooth will-change-scroll">
+      <div ref={messagesRef} className={`flex-1 overflow-y-auto px-4 py-3 space-y-1 ${reducedMotion ? '' : 'scroll-smooth will-change-scroll'}`} style={{ fontSize: `${fontSize}px` }}>
         {loading && (
           <div className="flex justify-center py-12">
             <div className="w-5 h-5 border-2 border-[#333] border-t-[#007AFF] rounded-full animate-spin" />
@@ -1356,7 +1471,7 @@ export default function ChatScreen() {
           </div>
         )}
 
-        {messages.map((msg, i) => {
+        {visibleMessages.map((msg, i) => {
           const replyCount = replyCounts[msg.id] || 0;
           return (
           <div
@@ -1365,7 +1480,7 @@ export default function ChatScreen() {
             className={`rounded-xl transition-colors ${highlightMsgId === msg.id ? 'bg-[#FF9F0A]/10 px-1.5' : ''}`}
           >
             <Fragment>
-            {(i === 0 || !isSameDay(messages[i - 1].timestamp, msg.timestamp)) && (
+            {(i === 0 || !isSameDay(visibleMessages[i - 1]?.timestamp ?? msg.timestamp, msg.timestamp)) && (
               <DateSeparator ts={msg.timestamp} />
             )}
             <MessageItem
@@ -1611,6 +1726,16 @@ export default function ChatScreen() {
               <path fillRule="evenodd" d="M2 5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5Zm3.293 2.293a1 1 0 0 1 1.414 0l3 3a1 1 0 0 1 0 1.414l-3 3a1 1 0 0 1-1.414-1.414L7.586 11 5.293 8.707a1 1 0 0 1 0-1.414Zm5 1a1 1 0 0 1 1.414-1.414l2 2a1 1 0 0 1 0 1.414l-2 2a1 1 0 0 1-1.414-1.414L12.586 10l-1.293-1.293a1 1 0 0 1-.293-.707Z" clipRule="evenodd" />
             </svg>
           </button>
+          <button
+            onClick={startTranscription}
+            className={`shrink-0 p-1 rounded-lg hover:bg-white/5 ${isTranscribing ? 'text-red-400 bg-red-400/10 animate-pulse' : 'text-[#555] hover:text-white'}`}
+            title="Voice to text"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5">
+              <path d="M10 1a3 3 0 0 0-3 3v5a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3Z" />
+              <path d="M5 9a.75.75 0 0 1 .75.75 4.25 4.25 0 0 0 8.5 0A.75.75 0 0 1 15 9.75a5.75 5.75 0 0 1-5 5.698V17a.75.75 0 0 1-1.5 0v-1.552A5.75 5.75 0 0 1 4.25 9.75A.75.75 0 0 1 5 9Z" />
+            </svg>
+          </button>
           <input
             ref={fileInputRef}
             type="file"
@@ -1758,6 +1883,93 @@ export default function ChatScreen() {
       {toast && (
         <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-[60] bg-[#1C1C1E] border border-[#333] text-white text-xs font-medium px-4 py-2.5 rounded-xl shadow-2xl animate-fade-in whitespace-nowrap">
           {toast}
+        </div>
+      )}
+
+      {forwardMsg && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="fixed inset-0 bg-black/70" onClick={() => setForwardMsg(null)} />
+          <div className="relative bg-[#1C1C1E] border border-[#333] rounded-2xl w-full max-w-sm p-5 animate-fade-in">
+            <h3 className="text-sm font-semibold text-white mb-3">Forward message</h3>
+            <p className="text-xs text-[#777] mb-3 truncate">"{forwardMsg.text.slice(0, 80)}"</p>
+            <p className="text-[11px] text-[#555] mb-2">Select room</p>
+            <div className="space-y-1 max-h-48 overflow-y-auto mb-3">
+              {useStore.getState().joinedRooms.filter((r) => r.code !== code).map((r) => (
+                <button key={r.code} onClick={() => forwardMessage(r.code)} className="w-full text-left px-3 py-2 rounded-lg bg-[#0D0D0D] hover:bg-[#252525] text-sm text-white flex justify-between">
+                  <span>{r.name}</span><span className="text-xs text-[#555]">#{r.code}</span>
+                </button>
+              ))}
+              {useStore.getState().joinedRooms.filter((r) => r.code !== code).length === 0 && (
+                <p className="text-xs text-[#555] text-center py-4">No other rooms</p>
+              )}
+            </div>
+            <button onClick={() => setForwardMsg(null)} className="w-full py-2 rounded-xl text-sm bg-[#333] text-white">Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {historyMsg && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="fixed inset-0 bg-black/70" onClick={() => setHistoryMsg(null)} />
+          <div className="relative bg-[#1C1C1E] border border-[#333] rounded-2xl w-full max-w-sm p-5 animate-fade-in">
+            <h3 className="text-sm font-semibold text-white mb-3">Edit history</h3>
+            <div className="space-y-2 max-h-64 overflow-y-auto">
+              {(historyMsg.editHistory || []).map((h, i) => (
+                <div key={i} className="bg-[#0D0D0D] rounded-lg p-3">
+                  <p className="text-xs text-[#ccc]">{h.text}</p>
+                  <p className="text-[10px] text-[#555] mt-1">{new Date(h.editedAt).toLocaleString()}</p>
+                </div>
+              ))}
+              {(!historyMsg.editHistory || historyMsg.editHistory.length === 0) && (
+                <p className="text-xs text-[#555] text-center py-4">No history</p>
+              )}
+              <div className="bg-[#007AFF]/10 border border-[#007AFF]/20 rounded-lg p-3">
+                <p className="text-xs text-white">{historyMsg.text}</p>
+                <p className="text-[10px] text-[#007AFF] mt-1">Current</p>
+              </div>
+            </div>
+            <button onClick={() => setHistoryMsg(null)} className="w-full mt-3 py-2 rounded-xl text-sm bg-[#333] text-white">Close</button>
+          </div>
+        </div>
+      )}
+
+      {lightboxSrc && (
+        <div className="fixed inset-0 z-50 bg-black/90 flex items-center justify-center p-4" onClick={() => setLightboxSrc(null)}>
+          <img src={lightboxSrc} alt="Preview" className="max-w-full max-h-full rounded-xl" />
+          <button onClick={() => setLightboxSrc(null)} className="absolute top-4 right-4 text-white bg-black/50 rounded-full p-2">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5"><path d="M6.28 5.22a.75.75 0 0 0-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 1 0 1.06 1.06L10 11.06l3.72 3.72a.75.75 0 1 0 1.06-1.06L11.06 10l3.72-3.72a.75.75 0 0 0-1.06-1.06L10 8.94 6.28 5.22Z" /></svg>
+          </button>
+        </div>
+      )}
+
+      {showCommandPalette && (
+        <div className="fixed inset-0 z-50 flex items-start justify-center pt-20 p-4">
+          <div className="fixed inset-0 bg-black/60" onClick={() => setShowCommandPalette(false)} />
+          <div className="relative bg-[#1C1C1E] border border-[#333] rounded-2xl w-full max-w-md overflow-hidden animate-fade-in">
+            <div className="px-4 py-3 border-b border-[#333]">
+              <input autoFocus placeholder="Type a command..." className="w-full bg-transparent text-white placeholder-[#555] outline-none text-sm" onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  const v = (e.target as HTMLInputElement).value.toLowerCase();
+                  if (v.includes('poll')) { setShowCommandPalette(false); setShowPollForm(true); }
+                  else if (v.includes('invite')) { setShowCommandPalette(false); setShowShare(true); }
+                  else if (v.includes('search')) { setShowCommandPalette(false); setShowSearch(true); }
+                  else if (v.includes('clear')) { setShowCommandPalette(false); }
+                  else if (v.includes('members')) { setShowCommandPalette(false); setShowMembers(true); }
+                }
+              }} />
+            </div>
+            <div className="p-2 space-y-1 max-h-64 overflow-y-auto">
+              {[
+                { label: 'Create poll', action: () => { setShowCommandPalette(false); setShowPollForm(true); } },
+                { label: 'Invite members', action: () => { setShowCommandPalette(false); setShowShare(true); } },
+                { label: 'Search messages', action: () => { setShowCommandPalette(false); setShowSearch(true); } },
+                { label: 'Show members', action: () => { setShowCommandPalette(false); setShowMembers(true); } },
+                { label: 'Toggle theme', action: () => { setShowCommandPalette(false); showToast('Theme toggled'); } },
+              ].map((c) => (
+                <button key={c.label} onClick={c.action} className="w-full text-left px-3 py-2 rounded-lg hover:bg-white/5 text-sm text-[#ccc]">{c.label}</button>
+              ))}
+            </div>
+          </div>
         </div>
       )}
 
@@ -2457,17 +2669,60 @@ function RichText({
   const parts: React.ReactNode[] = [];
   let key = 0;
 
+  const renderInlineMarkdown = (s: string): React.ReactNode[] => {
+    if (!s) return [];
+    const codeParts = s.split(/(`[^`]+`)/g);
+    const result: React.ReactNode[] = [];
+    for (const cp of codeParts) {
+      if (cp.startsWith('`') && cp.endsWith('`') && cp.length > 1) {
+        result.push(
+          <code key={`c${key++}`} className="bg-white/10 px-1 py-0.5 rounded text-xs font-mono border border-white/10">
+            {cp.slice(1, -1)}
+          </code>
+        );
+      } else if (cp) {
+        const boldParts = cp.split(/(\*\*[^*]+\*\*|__[^_]+__)/g);
+        for (const bp of boldParts) {
+          if ((bp.startsWith('**') && bp.endsWith('**')) || (bp.startsWith('__') && bp.endsWith('__'))) {
+            result.push(
+              <strong key={`b${key++}`} className="font-bold text-white">
+                {bp.slice(2, -2)}
+              </strong>
+            );
+          } else if (bp) {
+            const italicParts = bp.split(/(\*[^*]+\*|_[^_]+_)/g);
+            for (const ip of italicParts) {
+              if ((ip.startsWith('*') && ip.endsWith('*') && ip.length > 1) || (ip.startsWith('_') && ip.endsWith('_') && ip.length > 1)) {
+                result.push(
+                  <em key={`i${key++}`} className="italic text-[#E5E5E5]">
+                    {ip.slice(1, -1)}
+                  </em>
+                );
+              } else if (ip) {
+                result.push(ip);
+              }
+            }
+          }
+        }
+      }
+    }
+    return result;
+  };
+
   const pushPlain = (s: string) => {
     if (!s) return;
     if (!blurWords || blurWords.length === 0) {
-      parts.push(s);
+      for (const n of renderInlineMarkdown(s)) parts.push(n);
       return;
     }
     const wordRe = /([A-Za-z0-9_]+)/g;
     let wm: RegExpExecArray | null;
     let wLast = 0;
     while ((wm = wordRe.exec(s))) {
-      if (wm.index > wLast) parts.push(s.slice(wLast, wm.index));
+      if (wm.index > wLast) {
+        const gap = s.slice(wLast, wm.index);
+        for (const n of renderInlineMarkdown(gap)) parts.push(n);
+      }
       const word = wm[1];
       const hit = blurWords.find((b) => {
         if (!b) return false;
@@ -2496,37 +2751,51 @@ function RichText({
           );
         }
       } else {
-        parts.push(word);
+        for (const n of renderInlineMarkdown(word)) parts.push(n);
       }
       wLast = wm.index + word.length;
     }
-    parts.push(s.slice(wLast));
+    const tail = s.slice(wLast);
+    if (tail) for (const n of renderInlineMarkdown(tail)) parts.push(n);
   };
 
-  const regex = /(@[\w\u{4e00}-\u{9fff}]{1,20})|(https?:\/\/[^\s]+)/gu;
-  let last = 0;
-  let m: RegExpExecArray | null;
-  while ((m = regex.exec(text))) {
-    pushPlain(text.slice(last, m.index));
-    if (m[1]) {
-      parts.push(<span key={`m${key++}`} className="text-[#00FF88] font-medium">{m[1]}</span>);
-    } else if (m[2]) {
+  // Handle code blocks first
+  const codeBlockSegments = text.split(/(```[\s\S]*?```)/g);
+  for (const seg of codeBlockSegments) {
+    if (seg.startsWith('```') && seg.endsWith('```')) {
+      const codeContent = seg.slice(3, -3).trim();
       parts.push(
-        <a
-          key={`l${key++}`}
-          href={m[2]}
-          target="_blank"
-          rel="noopener noreferrer"
-          onClick={(e) => e.stopPropagation()}
-          className="text-[#00CFFF] underline decoration-dotted underline-offset-2 break-all"
-        >
-          {m[2]}
-        </a>
+        <pre key={`cb${key++}`} className="bg-[#0D0D0D] border border-[#333] rounded-lg p-3 my-1 overflow-x-auto text-xs font-mono whitespace-pre-wrap break-words">
+          <code>{codeContent}</code>
+        </pre>
       );
+      continue;
     }
-    last = m.index + m[0].length;
+    const regex = /(@[\w\u{4e00}-\u{9fff}]{1,20})|(https?:\/\/[^\s]+)/gu;
+    let last = 0;
+    let m: RegExpExecArray | null;
+    while ((m = regex.exec(seg))) {
+      pushPlain(seg.slice(last, m.index));
+      if (m[1]) {
+        parts.push(<span key={`m${key++}`} className="text-[#00FF88] font-medium">{m[1]}</span>);
+      } else if (m[2]) {
+        parts.push(
+          <a
+            key={`l${key++}`}
+            href={m[2]}
+            target="_blank"
+            rel="noopener noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            className="text-[#00CFFF] underline decoration-dotted underline-offset-2 break-all"
+          >
+            {m[2]}
+          </a>
+        );
+      }
+      last = m.index + m[0].length;
+    }
+    pushPlain(seg.slice(last));
   }
-  pushPlain(text.slice(last));
   return <>{parts}</>;
 }
 
@@ -2578,6 +2847,8 @@ async function decryptMessage(data: any, id: string, keys: Record<number, Crypto
       replyTo: parsed.replyTo || undefined,
       threadRootId: parsed.threadRootId || undefined,
       edited: data.edited || false,
+      editHistory: data.editHistory || parsed.editHistory || undefined,
+      forwarded: data.forwarded || parsed.forwarded || false,
       deleted: data.deleted || false,
       reactions: data.reactions || undefined,
       readerUids: data.readers ?? [],
@@ -3137,8 +3408,9 @@ const MessageItem = memo(function MessageItem({
                   <img
                     src={msg.text}
                     alt="Shared image"
-                    className="w-full h-auto max-h-72 object-cover"
+                    className="w-full h-auto max-h-72 object-cover cursor-zoom-in"
                     loading="lazy"
+                    onClick={() => (window as any).chatrixLightbox?.(msg.text)}
                   />
                 </div>
               ) : (
@@ -3284,6 +3556,40 @@ const MessageItem = memo(function MessageItem({
                         Copy
                       </button>
                     )}
+                    <button
+                      onClick={() => { onMenuOpen(null); (window as any).chatrixForward?.(msg); }}
+                      className="w-full flex items-center gap-2 px-3 py-2 text-xs text-[#ccc] hover:bg-white/5 transition-colors"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5"><path d="M12.5 2.75a.75.75 0 0 0-1.5 0v2.5H9.5a.75.75 0 0 0 0 1.5h1.5v2.5a.75.75 0 0 0 1.5 0v-7.5Z" /><path d="M3.5 9.5A1.5 1.5 0 0 1 5 8h7a1.5 1.5 0 0 1 1.5 1.5v1A1.5 1.5 0 0 1 12 12H5a1.5 1.5 0 0 1-1.5-1.5v-1Z" /></svg>
+                      Forward
+                    </button>
+                    {!isOwn && (
+                      <>
+                        <button
+                          onClick={() => { onMenuOpen(null); (window as any).chatrixMute?.(msg.senderUid); }}
+                          className="w-full flex items-center gap-2 px-3 py-2 text-xs text-[#ccc] hover:bg-white/5 transition-colors"
+                        >
+                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5"><path d="M5.5 9.5a4.5 4.5 0 0 1 9 0v3.5a.75.75 0 0 1-1.5 0V9.5a3 3 0 1 0-6 0v3.5a.75.75 0 0 1-1.5 0V9.5Z" /><path d="M4.22 4.22a.75.75 0 0 1 1.06 0l12 12a.75.75 0 1 1-1.06 1.06l-12-12a.75.75 0 0 1 0-1.06Z" /></svg>
+                          Mute
+                        </button>
+                        <button
+                          onClick={() => { onMenuOpen(null); (window as any).chatrixReport?.(msg); }}
+                          className="w-full flex items-center gap-2 px-3 py-2 text-xs text-[#FF9500] hover:bg-white/5 transition-colors"
+                        >
+                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5"><path fillRule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.88 11.918c.673 1.167-.17 2.625-1.516 2.625H3.12c-1.346 0-2.189-1.458-1.515-2.625l6.88-11.918ZM10 6.5a.75.75 0 0 1 .75.75v4a.75.75 0 0 1-1.5 0v-4A.75.75 0 0 1 10 6.5Zm0 7a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Z" clipRule="evenodd" /></svg>
+                          Report
+                        </button>
+                      </>
+                    )}
+                    {msg.editHistory && msg.editHistory.length > 0 && (
+                      <button
+                        onClick={() => { onMenuOpen(null); (window as any).chatrixHistory?.(msg); }}
+                        className="w-full flex items-center gap-2 px-3 py-2 text-xs text-[#ccc] hover:bg-white/5 transition-colors"
+                      >
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5"><path fillRule="evenodd" d="M10 18a8 8 0 1 0 0-16 8 8 0 0 0 0 16Zm.75-13a.75.75 0 0 0-1.5 0v5c0 .414.336.75.75.75h4a.75.75 0 0 0 0-1.5h-3.25V5Z" clipRule="evenodd" /></svg>
+                        History
+                      </button>
+                    )}
                     {isOwn && (
                       <button
                         onClick={() => { onMenuOpen(null); onEdit(msg); }}
@@ -3360,12 +3666,12 @@ const MessageItem = memo(function MessageItem({
 
           {isOwn && (msg.readerUids ?? []).length > 0 && (
             <div
-              className="mt-1 flex items-center justify-end"
+              className="mt-1 flex flex-row items-center justify-end gap-1"
               title={`Seen by ${msg.readerUids!.map(resolveName).join(', ')}`}
             >
-              <div className="flex -space-x-1.5">
+              <div className="flex flex-row items-center -space-x-1.5 flex-nowrap">
                 {msg.readerUids!.slice(0, 5).map((uid) => (
-                  <div key={uid} className="rounded-full ring-2 ring-[#0A0A0A] overflow-hidden">
+                  <div key={uid} className="rounded-full ring-2 ring-black overflow-hidden shrink-0">
                     <Avatar name={resolveName(uid) || uid.slice(0, 6)} size="xs" />
                   </div>
                 ))}
