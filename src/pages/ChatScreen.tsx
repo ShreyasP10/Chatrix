@@ -462,6 +462,9 @@ export default function ChatScreen() {
     const unsub = onSnapshot(
       q,
       async (snap) => {
+        // Capture before it's flipped below: only the very first snapshot
+        // (when the room is first opened) should count as "read".
+        const isInitialLoad = !initialSnapshotDone.current;
         const docs = snap.docs;
         const isHidden = document.hidden;
         const now = Date.now();
@@ -544,7 +547,7 @@ export default function ChatScreen() {
               const d = c.doc.data();
               if (d.senderUid === userRef.current.uid) continue;
               const seq = d.seq || 0;
-              if (seq > lastReadSeqRef.current && !d.burn) {
+              if (!d.burn) {
                 updateDoc(doc(db, 'rooms', code, 'messages', c.doc.id), {
                   readers: arrayUnion(userRef.current.uid),
                 }).catch(() => {});
@@ -576,8 +579,12 @@ export default function ChatScreen() {
             return merged;
           });
         }
-        // Mark room as read (updates unread badges on dashboard)
-        if (userRef.current) {
+        // Mark room as read (updates unread badges on dashboard).
+        // On the initial load, and whenever the room is actively visible in the
+        // foreground. Never while the tab is hidden — otherwise incoming
+        // messages would reset lastReadTimestamp and the unread badge
+        // would never appear.
+        if (userRef.current && (isInitialLoad || !document.hidden)) {
           const now = Date.now();
           localDB.joinedRooms.get(code).then((local) => {
             localDB.joinedRooms.put({
@@ -1476,7 +1483,7 @@ export default function ChatScreen() {
           </div>
         )}
 
-        {hasMore && !loading && messages.length >= PAGE_SIZE && (
+        {hasMore && !loading && (
           <div className="sticky top-0 z-10 flex justify-center py-2 bg-gradient-to-b from-black/80 to-transparent backdrop-blur-[2px]">
             <button
               onClick={loadOlder}
@@ -1484,7 +1491,7 @@ export default function ChatScreen() {
               className="px-4 py-1.5 rounded-full bg-[#1C1C1E] border border-[#333] text-xs font-medium text-[#ccc] hover:bg-[#252525] hover:text-white hover:border-[#555] transition-all disabled:opacity-40 flex items-center gap-1.5 shadow-lg"
             >
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3.5 h-3.5"><path fillRule="evenodd" d="M9.78 4.22a.75.75 0 0 1 0 1.06L5.56 9.5h8.69a.75.75 0 0 1 0 1.5H5.56l4.22 4.22a.75.75 0 1 1-1.06 1.06l-5.5-5.5a.75.75 0 0 1 0-1.06l5.5-5.5a.75.75 0 0 1 1.06 0Z" clipRule="evenodd" /></svg>
-              {loadingOlder ? 'Loading...' : `Load older · ${messages.length} loaded`}
+              {loadingOlder ? 'Loading...' : 'Load older messages'}
             </button>
           </div>
         )}

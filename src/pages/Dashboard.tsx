@@ -1168,8 +1168,44 @@ function RoomItem({
 
   useEffect(() => {
     let cancelled = false;
+    // Instant preview (before the listener's first emit), then kept live below.
     getLastMessage(room.code).then((msg) => {
       if (msg && !cancelled) setPreview(msg);
+    });
+    // Real-time last-message preview: subscribe so the dashboard reflects new
+    // messages instantly instead of only after reopening the room.
+    const q = query(
+      collection(db, 'rooms', room.code, 'messages'),
+      orderBy('seq', 'desc'),
+      limit(1)
+    );
+    const unsub = onSnapshot(q, async (snap) => {
+      if (cancelled) return;
+      if (snap.empty) { setPreview(null); return; }
+      const d = snap.docs[0].data();
+      if (d.sys) {
+        setPreview({ text: `[${d.sys.type === 'join' ? 'Joined' : 'Left'}]`, timestamp: d.timestamp?.toMillis?.() ?? Date.now(), senderUid: d.senderUid || '', senderName: d.sys.name || '' });
+        return;
+      }
+      if (d.poll) {
+        setPreview({ text: '[Poll]', timestamp: d.timestamp?.toMillis?.() ?? Date.now(), senderUid: d.senderUid || '', senderName: d.senderName || '' });
+        return;
+      }
+      if (!d.ciphertext || !d.iv) { setPreview(null); return; }
+      try {
+        const key = await deriveKey(room.code, d.kv ?? 0);
+        const dec = await decrypt(d.ciphertext, d.iv, key);
+        const parsed = JSON.parse(dec);
+        const isImage = parsed.type === 'image' || parsed.type === 'gif';
+        setPreview({
+          text: (isImage ? 'Image' : (parsed.text || dec)).slice(0, 40),
+          timestamp: d.timestamp?.toMillis?.() ?? Date.now(),
+          senderUid: d.senderUid,
+          senderName: d.senderName || d.senderUid?.slice(0, 6),
+        });
+      } catch {
+        setPreview({ text: '[Encrypted]', timestamp: d.timestamp?.toMillis?.() ?? Date.now(), senderUid: d.senderUid, senderName: d.senderName || '' });
+      }
     });
     // Fetch room name from Firestore (for rooms that may not have name stored locally)
     getDoc(doc(db, 'rooms', room.code)).then((snap) => {
@@ -1178,8 +1214,8 @@ function RoomItem({
         if (data.name) setRoomName(data.name);
       }
     });
-    return () => { cancelled = true; };
-  }, [room.code, getLastMessage]);
+    return () => { cancelled = true; unsub(); };
+  }, [room.code]);
 
   useEffect(() => {
     const unsub = onSnapshot(doc(db, 'rooms', room.code), (snap) => {
