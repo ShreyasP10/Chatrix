@@ -75,6 +75,8 @@ export default function ChatScreen() {
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [showCommandPalette, setShowCommandPalette] = useState(false);
+  const [viewOnce, setViewOnce] = useState(false);
+  const [showHeaderMenu, setShowHeaderMenu] = useState(false);
   const [roomReady, setRoomReady] = useState(false);
 
   const [roomName, setRoomName] = useState('');
@@ -99,7 +101,7 @@ export default function ChatScreen() {
   const lastDocRef = useRef<any>(null);
   const [hasMore, setHasMore] = useState(true);
   const [loadingOlder, setLoadingOlder] = useState(false);
-  const scrollAnchorRef = useRef<{ scrollHeight: number } | null>(null);
+  const scrollAnchorRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
   const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -618,7 +620,7 @@ export default function ChatScreen() {
       if (el) {
         const newHeight = el.scrollHeight;
         const diff = newHeight - scrollAnchorRef.current.scrollHeight;
-        el.scrollTop += diff;
+        el.scrollTop = scrollAnchorRef.current.scrollTop + diff;
       }
       scrollAnchorRef.current = null;
       return;
@@ -650,7 +652,7 @@ export default function ChatScreen() {
     );
 
     const el = messagesRef.current;
-    if (el) scrollAnchorRef.current = { scrollHeight: el.scrollHeight };
+    if (el) scrollAnchorRef.current = { scrollHeight: el.scrollHeight, scrollTop: el.scrollTop };
     setMessages((prev) => [...older.reverse(), ...prev]);
     setLoadingOlder(false);
   }, [code, cryptoKey, hasMore, loadingOlder, setMessages, keys]);
@@ -1286,6 +1288,10 @@ export default function ChatScreen() {
       if (!isImage) {
         payload.file = { name: file.name, size: file.size, mimeType: file.type };
       }
+      if (viewOnce && isImage) {
+        payload.viewOnce = true;
+        payload.viewedBy = [];
+      }
       if (replyTo) {
         payload.replyTo = { messageId: replyTo.messageId, senderName: replyTo.senderName, text: replyTo.text };
         payload.threadRootId = replyTo.threadRootId || replyTo.messageId;
@@ -1306,6 +1312,7 @@ export default function ChatScreen() {
       updateDoc(doc(db, 'rooms', code, 'members', user.uid), { lastSpokeAt: serverTimestamp() }).catch(() => {});
     } catch {}
     setSending(false);
+    setViewOnce(false);
     if (e.target) e.target.value = '';
   };
 
@@ -1360,7 +1367,7 @@ export default function ChatScreen() {
   }, []);
 
   return (
-    <div className={`flex flex-col h-dvh max-w-md md:max-w-lg lg:max-w-xl mx-auto ${voiceCall.inCall ? 'pb-[58px]' : ''}`} style={{ background: 'radial-gradient(ellipse at 50% 0%, #0a0a0f 0%, #000 70%)' }}>
+    <div className="flex flex-col h-dvh max-w-md md:max-w-lg lg:max-w-xl mx-auto" style={{ background: 'radial-gradient(ellipse at 50% 0%, #0a0a0f 0%, #000 70%)' }}>
       <header className="flex items-center gap-3 px-4 py-3 border-b border-[#222] shrink-0 bg-black/50 backdrop-blur-sm">
         <button onClick={() => navigate('/')} className="text-[#007AFF] font-medium text-sm shrink-0 hover:opacity-80 transition-opacity">
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 inline-block -ml-1">
@@ -1441,7 +1448,7 @@ export default function ChatScreen() {
         </button>
         <button
           onClick={() => setShowSearch(true)}
-          className="p-2 rounded-lg transition-all shrink-0 text-[#555] hover:text-white hover:bg-white/5"
+          className="hidden sm:flex p-2 rounded-lg transition-all shrink-0 text-[#555] hover:text-white hover:bg-white/5"
           title="Search messages"
         >
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5">
@@ -1450,7 +1457,7 @@ export default function ChatScreen() {
         </button>
         <button
           onClick={() => setShowShare(true)}
-          className="p-2 rounded-lg transition-all shrink-0 text-[#555] hover:text-white hover:bg-white/5"
+          className="hidden sm:flex p-2 rounded-lg transition-all shrink-0 text-[#555] hover:text-white hover:bg-white/5"
           title="Share room"
         >
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5">
@@ -1459,13 +1466,25 @@ export default function ChatScreen() {
         </button>
         <button
           onClick={() => setShowSettings(true)}
-          className="p-2 rounded-lg transition-all shrink-0 text-[#555] hover:text-white hover:bg-white/5"
+          className="hidden sm:flex p-2 rounded-lg transition-all shrink-0 text-[#555] hover:text-white hover:bg-white/5"
           title="Room settings"
         >
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5">
             <path fillRule="evenodd" d="M7.84 1.804A1 1 0 0 1 8.82 1h2.36a1 1 0 0 1 .98.804l.331 1.652a6.993 6.993 0 0 1 1.929 1.115l1.598-.54a1 1 0 0 1 1.186.447l1.18 2.044a1 1 0 0 1-.205 1.251l-1.267 1.113a7.047 7.047 0 0 1 0 2.228l1.267 1.113a1 1 0 0 1 .206 1.25l-1.18 2.045a1 1 0 0 1-1.187.447l-1.598-.54a6.993 6.993 0 0 1-1.929 1.115l-.33 1.652a1 1 0 0 1-.98.804H8.82a1 1 0 0 1-.98-.804l-.331-1.652a6.993 6.993 0 0 1-1.929-1.115l-1.598.54a1 1 0 0 1-1.186-.447l-1.18-2.044a1 1 0 0 1 .205-1.251l1.267-1.114a7.05 7.05 0 0 1 0-2.227L1.821 7.773a1 1 0 0 1-.206-1.25l1.18-2.045a1 1 0 0 1 1.187-.447l1.598.54A6.993 6.993 0 0 1 7.51 3.456l.33-1.652ZM10 13a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" clipRule="evenodd" />
           </svg>
         </button>
+        <div className="relative sm:hidden">
+          <button onClick={() => setShowHeaderMenu(!showHeaderMenu)} className="p-2 rounded-lg text-[#555] hover:text-white hover:bg-white/5">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5"><path d="M10 3a2 2 0 1 0 0 4 2 2 0 0 0 0-4ZM10 11a2 2 0 1 0 0 4 2 2 0 0 0 0-4ZM10 16a2 2 0 1 0 0 4 2 2 0 0 0 0-4Z" /></svg>
+          </button>
+          {showHeaderMenu && (
+            <div className="absolute right-0 top-full mt-1 w-40 bg-[#1C1C1E] border border-[#333] rounded-xl shadow-xl overflow-hidden z-20">
+              <button onClick={() => { setShowHeaderMenu(false); setShowSearch(true); }} className="w-full text-left px-3 py-2 text-xs text-[#ccc] hover:bg-white/5">🔍 Search</button>
+              <button onClick={() => { setShowHeaderMenu(false); setShowShare(true); }} className="w-full text-left px-3 py-2 text-xs text-[#ccc] hover:bg-white/5">🔗 Share</button>
+              <button onClick={() => { setShowHeaderMenu(false); setShowSettings(true); }} className="w-full text-left px-3 py-2 text-xs text-[#ccc] hover:bg-white/5">⚙️ Settings</button>
+            </div>
+          )}
+        </div>
       </header>
 
       {roomSettings?.frozen && (
@@ -1484,7 +1503,7 @@ export default function ChatScreen() {
         )}
 
         {hasMore && !loading && (
-          <div className="sticky top-0 z-10 flex justify-center py-2 bg-gradient-to-b from-black/80 to-transparent backdrop-blur-[2px]">
+          <div className="flex justify-center py-2">
             <button
               onClick={loadOlder}
               disabled={loadingOlder}
@@ -1544,6 +1563,7 @@ export default function ChatScreen() {
                 roomSettings?.effectWords?.some((w) => w && new RegExp(`(^|[^a-z0-9])${w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([^a-z0-9]|$)`).test(msg.text.toLowerCase()))
               )}
               showLinkPreview={roomSettings?.linkPreviews !== false}
+              onViewOnce={(msgId) => { if (code && user?.uid) updateDoc(doc(db, 'rooms', code, 'messages', msgId), { viewedBy: arrayUnion(user.uid) }).catch(()=>{}); }}
               prevSenderSame={i > 0 && messages[i - 1].senderUid === msg.senderUid}
               replyCount={replyCount}
               onJumpToMessage={scrollToMessage}
@@ -1755,8 +1775,19 @@ export default function ChatScreen() {
             </svg>
           </button>
           <button
+            onClick={() => setViewOnce(!viewOnce)}
+            className={`hidden sm:flex shrink-0 p-1 rounded-lg hover:bg-white/5 ${viewOnce ? 'text-[#FF3B30] bg-[#FF3B30]/10' : 'text-[#555] hover:text-white'}`}
+            title="View once (image disappears after viewing)"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5">
+              <path d="M10 12.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z" />
+              <path fillRule="evenodd" d="M.664 10.59a1.651 1.651 0 0 1 0-1.18l3.11-4.944A1.5 1.5 0 0 1 5.05 3.75h9.9a1.5 1.5 0 0 1 1.278.72l3.11 4.944a1.651 1.651 0 0 1 0 1.18l-3.11 4.944A1.5 1.5 0 0 1 14.95 16.25H5.05a1.5 1.5 0 0 1-1.278-.72L.664 10.59ZM10 6a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z" clipRule="evenodd" />
+              {viewOnce && <path d="M13.5 4.938a7 7 0 1 1-9.006 1.737c.202-.268.59-.295.793-.038.586.737 1.316 1.33 2.114 1.623C9.594 9.215 10.95 10 12.75 10a.75.75 0 0 0 0-1.5c-1.531 0-2.648-.548-3.563-1.37-.674-.603-.99-1.313-1.252-2.043C8.32 4.13 9.208 3.55 9.987 3.5c.257-.021.504.044.727.186.796.505 1.496 1.12 2.1 1.882a.75.75 0 0 0 1.086.63c.047-.025.092-.053.136-.082a.24.24 0 0 1 .117-.033c.257.002.51.025.77.06l.2.03c.07.01.135.028.198.045a.75.75 0 0 0 .18-1.488l-.2-.03A7.16 7.16 0 0 0 15 4.16a.75.75 0 0 0-1.5.778ZM13.4 8.5a.75.75 0 0 1 .37 1.4l-4.5 2.6a.75.75 0 1 1-.75-1.3l4.5-2.6a.75.75 0 0 1 .38-.1Z" clipRule="evenodd" />}
+            </svg>
+          </button>
+          <button
             onClick={() => setShowPollForm(!showPollForm)}
-            className={`shrink-0 transition-colors p-1 rounded-lg hover:bg-white/5 ${showPollForm ? 'text-[#FF9F0A]' : 'text-[#555] hover:text-white'}`}
+            className={`hidden sm:flex shrink-0 transition-colors p-1 rounded-lg hover:bg-white/5 ${showPollForm ? 'text-[#FF9F0A]' : 'text-[#555] hover:text-white'}`}
             title="Create poll"
           >
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5">
@@ -1765,7 +1796,7 @@ export default function ChatScreen() {
           </button>
           <button
             onClick={startTranscription}
-            className={`shrink-0 p-1 rounded-lg hover:bg-white/5 ${isTranscribing ? 'text-red-400 bg-red-400/10 animate-pulse' : 'text-[#555] hover:text-white'}`}
+            className={`hidden sm:flex shrink-0 p-1 rounded-lg hover:bg-white/5 ${isTranscribing ? 'text-red-400 bg-red-400/10 animate-pulse' : 'text-[#555] hover:text-white'}`}
             title="Voice to text"
           >
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5">
@@ -2917,6 +2948,8 @@ async function decryptMessage(data: any, id: string, keys: Record<number, Crypto
       edited: data.edited || false,
       editHistory: data.editHistory || parsed.editHistory || undefined,
       forwarded: data.forwarded || parsed.forwarded || false,
+      viewOnce: data.viewOnce || parsed.viewOnce || false,
+      viewedBy: data.viewedBy || parsed.viewedBy || [],
       deleted: data.deleted || false,
       reactions: data.reactions || undefined,
       readerUids: data.readers ?? [],
@@ -3256,6 +3289,7 @@ const MessageItem = memo(function MessageItem({
   blurWords,
   hasEffect,
   showLinkPreview,
+  onViewOnce,
 }: {
   msg: DecryptedMessage;
   isOwn: boolean;
@@ -3280,6 +3314,7 @@ const MessageItem = memo(function MessageItem({
   blurWords?: string[];
   hasEffect?: boolean;
   showLinkPreview?: boolean;
+  onViewOnce?: (msgId: string) => void;
 }) {
   const [hoveredReaction, setHoveredReaction] = useState<string | null>(null);
   const [revealedWords, setRevealedWords] = useState<Set<string>>(new Set());
@@ -3483,7 +3518,12 @@ const MessageItem = memo(function MessageItem({
           ) : (
           <div className={`relative group ${isImage || isFile ? '' : 'max-w-full'}`}>
             {isImage ? (
-              msg.text.startsWith('data:image/') ? (
+              msg.viewOnce && msg.viewedBy?.includes(userUid || '') && msg.senderUid !== userUid ? (
+                <div className="px-3.5 py-2.5 rounded-2xl text-sm bg-[#111] text-[#555] italic border border-[#222] flex items-center gap-2">
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4"><path d="M10 12.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z" /><path fillRule="evenodd" d="M.664 10.59a1.651 1.651 0 0 1 0-1.18l3.11-4.944A1.5 1.5 0 0 1 5.05 3.75h9.9a1.5 1.5 0 0 1 1.278.72l3.11 4.944a1.651 1.651 0 0 1 0 1.18l-3.11 4.944A1.5 1.5 0 0 1 14.95 16.25H5.05a1.5 1.5 0 0 1-1.278-.72L.664 10.59ZM10 6a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z" clipRule="evenodd" /></svg>
+                  Viewed
+                </div>
+              ) : msg.text.startsWith('data:image/') ? (
                 <div
                   className={`max-w-full rounded-2xl overflow-hidden border border-[#333]/50 shadow-lg ${
                     isOwn ? 'rounded-br-sm' : 'rounded-bl-sm'
@@ -3494,8 +3534,14 @@ const MessageItem = memo(function MessageItem({
                     alt="Shared image"
                     className="w-full h-auto max-h-72 object-cover cursor-zoom-in"
                     loading="lazy"
-                    onClick={() => (window as any).chatrixLightbox?.(msg.text)}
+                    onClick={() => {
+                      (window as any).chatrixLightbox?.(msg.text);
+                      if (msg.viewOnce && msg.senderUid !== userUid && !msg.viewedBy?.includes(userUid || '')) {
+                        onViewOnce?.(msg.id);
+                      }
+                    }}
                   />
+                  {msg.viewOnce && <div className="px-2 py-1 bg-black/70 text-[10px] text-white flex items-center gap-1"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3 h-3"><path d="M10 12.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z" /><path fillRule="evenodd" d="M.664 10.59a1.651 1.651 0 0 1 0-1.18l3.11-4.944A1.5 1.5 0 0 1 5.05 3.75h9.9a1.5 1.5 0 0 1 1.278.72l3.11 4.944a1.651 1.651 0 0 1 0 1.18l-3.11 4.944A1.5 1.5 0 0 1 14.95 16.25H5.05a1.5 1.5 0 0 1-1.278-.72L.664 10.59ZM10 6a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z" clipRule="evenodd" /></svg> View once</div>}
                 </div>
               ) : (
                 <div className="px-3.5 py-2.5 rounded-2xl text-sm bg-[#1C1C1E] text-[#777] border border-[#2A2A2A]">

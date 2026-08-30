@@ -53,6 +53,8 @@ export interface DecryptedMessage {
   editHistory?: { text: string; editedAt: number }[];
   deleted?: boolean;
   forwarded?: boolean;
+  viewOnce?: boolean;
+  viewedBy?: string[];
   reactions?: Record<string, string[]>;
   poll?: PollData;
   sys?: SysData;

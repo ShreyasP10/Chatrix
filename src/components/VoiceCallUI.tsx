@@ -85,8 +85,8 @@ export default function VoiceCallUI({
   return (
     <>
       {remoteScreens.length > 0 && (
-        <div className="fixed bottom-20 left-0 right-0 z-40 px-4">
-          <div className="max-w-md md:max-w-lg lg:max-w-xl mx-auto space-y-2">
+        <div className="px-4 pt-2">
+          <div className="space-y-2">
             {remoteScreens.map((s) => (
               <div key={s.uid} className="rounded-2xl overflow-hidden border border-[#333] bg-black shadow-2xl">
                 <div className="flex items-center justify-between px-3 py-1.5 bg-[#0D0D0D]">
@@ -102,16 +102,14 @@ export default function VoiceCallUI({
         </div>
       )}
       {remoteScreens.length === 0 && sharerName && (
-        <div className="fixed bottom-20 left-0 right-0 z-40 px-4">
-          <div className="max-w-md md:max-w-lg lg:max-w-xl mx-auto">
-            <div className="rounded-2xl border border-[#333] bg-[#0D0D0D] px-4 py-3 shadow-2xl flex items-center gap-2.5">
-              <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
-              <span className="text-xs text-[#ccc]">{sharerName} is sharing screen — waiting for stream...</span>
-            </div>
+        <div className="px-4 pt-2">
+          <div className="rounded-2xl border border-[#333] bg-[#0D0D0D] px-4 py-3 shadow-2xl flex items-center gap-2.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
+            <span className="text-xs text-[#ccc]">{sharerName} is sharing screen — waiting for stream...</span>
           </div>
         </div>
       )}
-      <div className="fixed bottom-0 left-0 right-0 z-40 bg-[#0D0D0D] border-t border-[#222] backdrop-blur-md">
+      <div className="mx-4 mb-2 bg-[#0D0D0D] border border-[#222] rounded-2xl backdrop-blur-md">
         <div className="max-w-md md:max-w-lg lg:max-w-xl mx-auto px-4 py-3">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 min-w-0 flex-1">
