@@ -1776,7 +1776,7 @@ export default function ChatScreen() {
           </button>
           <button
             onClick={() => setViewOnce(!viewOnce)}
-            className={`hidden sm:flex shrink-0 p-1 rounded-lg hover:bg-white/5 ${viewOnce ? 'text-[#FF3B30] bg-[#FF3B30]/10' : 'text-[#555] hover:text-white'}`}
+            className={`hidden sm:flex shrink-0 p-1 rounded-lg hover:bg-white/5 items-center gap-1 ${viewOnce ? 'text-[#FF3B30] bg-[#FF3B30]/10' : 'text-[#555] hover:text-white'}`}
             title="View once (image disappears after viewing)"
           >
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5">
@@ -1784,7 +1784,12 @@ export default function ChatScreen() {
               <path fillRule="evenodd" d="M.664 10.59a1.651 1.651 0 0 1 0-1.18l3.11-4.944A1.5 1.5 0 0 1 5.05 3.75h9.9a1.5 1.5 0 0 1 1.278.72l3.11 4.944a1.651 1.651 0 0 1 0 1.18l-3.11 4.944A1.5 1.5 0 0 1 14.95 16.25H5.05a1.5 1.5 0 0 1-1.278-.72L.664 10.59ZM10 6a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z" clipRule="evenodd" />
               {viewOnce && <path d="M13.5 4.938a7 7 0 1 1-9.006 1.737c.202-.268.59-.295.793-.038.586.737 1.316 1.33 2.114 1.623C9.594 9.215 10.95 10 12.75 10a.75.75 0 0 0 0-1.5c-1.531 0-2.648-.548-3.563-1.37-.674-.603-.99-1.313-1.252-2.043C8.32 4.13 9.208 3.55 9.987 3.5c.257-.021.504.044.727.186.796.505 1.496 1.12 2.1 1.882a.75.75 0 0 0 1.086.63c.047-.025.092-.053.136-.082a.24.24 0 0 1 .117-.033c.257.002.51.025.77.06l.2.03c.07.01.135.028.198.045a.75.75 0 0 0 .18-1.488l-.2-.03A7.16 7.16 0 0 0 15 4.16a.75.75 0 0 0-1.5.778ZM13.4 8.5a.75.75 0 0 1 .37 1.4l-4.5 2.6a.75.75 0 1 1-.75-1.3l4.5-2.6a.75.75 0 0 1 .38-.1Z" clipRule="evenodd" />}
             </svg>
+            <span className="text-[11px] hidden sm:inline">{viewOnce ? 'View once: ON' : 'View once'}</span>
           </button>
+          <label className="flex sm:hidden items-center gap-1 text-[10px] text-[#555] cursor-pointer">
+            <input type="checkbox" checked={viewOnce} onChange={(e) => setViewOnce(e.target.checked)} className="w-3 h-3 rounded" />
+            Once
+          </label>
           <button
             onClick={() => setShowPollForm(!showPollForm)}
             className={`hidden sm:flex shrink-0 transition-colors p-1 rounded-lg hover:bg-white/5 ${showPollForm ? 'text-[#FF9F0A]' : 'text-[#555] hover:text-white'}`}
@@ -3516,7 +3521,7 @@ const MessageItem = memo(function MessageItem({
               </p>
             </div>
           ) : (
-          <div className={`relative group ${isImage || isFile ? '' : 'max-w-full'}`}>
+          <div className={`relative group ${isImage || isFile ? '' : 'max-w-full'}`} onClick={() => onMenuOpen(msg.id)}>
             {isImage ? (
               msg.viewOnce && msg.viewedBy?.includes(userUid || '') && msg.senderUid !== userUid ? (
                 <div className="px-3.5 py-2.5 rounded-2xl text-sm bg-[#111] text-[#555] italic border border-[#222] flex items-center gap-2">
@@ -3534,7 +3539,8 @@ const MessageItem = memo(function MessageItem({
                     alt="Shared image"
                     className="w-full h-auto max-h-72 object-cover cursor-zoom-in"
                     loading="lazy"
-                    onClick={() => {
+                    onClick={(e) => {
+                      e.stopPropagation();
                       (window as any).chatrixLightbox?.(msg.text);
                       if (msg.viewOnce && msg.senderUid !== userUid && !msg.viewedBy?.includes(userUid || '')) {
                         onViewOnce?.(msg.id);
@@ -3648,11 +3654,11 @@ const MessageItem = memo(function MessageItem({
               </div>
             )}
 
-            {/* Three-dot menu — overlay on hover, no layout shift */}
-            <div className={`absolute ${isOwn ? 'left-0 -translate-x-full -ml-1' : 'right-0 translate-x-full mr-1'} top-0 opacity-0 group-hover:opacity-100 transition-opacity`}>
+            {/* Three-dot menu — tap to show on PWA, hover on desktop */}
+            <div className={`absolute ${isOwn ? 'left-0 -translate-x-full -ml-1' : 'right-0 translate-x-full mr-1'} top-0 ${menuOpen ? 'opacity-100' : 'opacity-60 sm:opacity-0 sm:group-hover:opacity-100'} transition-opacity z-10`}>
               <button
                 onClick={() => onMenuOpen(menuOpen ? null : msg.id)}
-                className="text-[#444] hover:text-white p-1 rounded-lg hover:bg-white/5 transition-all bg-[#0D0D0D]"
+                className="text-[#888] hover:text-white p-1.5 rounded-lg hover:bg-white/5 transition-all bg-[#0D0D0D] border border-[#222] shadow-lg"
                 title="More"
               >
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
@@ -3661,8 +3667,8 @@ const MessageItem = memo(function MessageItem({
               </button>
               {menuOpen && (
                 <>
-                  <div className="fixed inset-0 z-10" onClick={() => onMenuOpen(null)} />
-                  <div className={`absolute z-20 min-w-[140px] bg-[#1C1C1E] border border-[#333] rounded-xl shadow-xl py-1 ${isOwn ? 'top-0 left-0 ml-1' : 'top-0 right-0 mr-1'}`}>
+                  <div className="fixed inset-0 z-30" onClick={() => onMenuOpen(null)} />
+                  <div className={`absolute z-40 min-w-[160px] bg-[#1C1C1E] border border-[#333] rounded-xl shadow-2xl py-1 ${isOwn ? 'top-8 left-0' : 'top-8 right-0'}`}>
                     <button
                       onClick={() => { onMenuOpen(null); onReply(msg); }}
                       className="w-full flex items-center gap-2 px-3 py-2 text-xs text-[#ccc] hover:bg-white/5 transition-colors"

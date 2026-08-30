@@ -42,6 +42,7 @@ export default function Dashboard() {
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [createName, setCreateName] = useState('');
   const [createType, setCreateType] = useState<'permanent' | 'auto'>('permanent');
+  const [_confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [showAvatarPicker, setShowAvatarPicker] = useState(false);
   const [showBackup, setShowBackup] = useState(false);
   const navigate = useNavigate();
@@ -842,11 +843,18 @@ export default function Dashboard() {
                   setJoinedRooms(joinedRooms.map((r) => r.code === room.code ? updated : r));
                 }}
                 onDelete={() => {
-                  localDB.joinedRooms.delete(room.code);
-                  removeJoinedRoom(room.code);
-                  const remaining = useStore.getState().joinedRooms.map((r) => r.code);
-                  swSend({ type: 'WATCH_ROOMS', rooms: remaining });
+                  if (_confirmDelete === room.code) {
+                    localDB.joinedRooms.delete(room.code);
+                    removeJoinedRoom(room.code);
+                    const remaining = useStore.getState().joinedRooms.map((r) => r.code);
+                    swSend({ type: 'WATCH_ROOMS', rooms: remaining });
+                    setConfirmDelete(null);
+                  } else {
+                    setConfirmDelete(room.code);
+                    setTimeout(() => setConfirmDelete((c) => c === room.code ? null : c), 3000);
+                  }
                 }}
+                confirmDelete={_confirmDelete === room.code}
                 getLastMessage={getLastMessage}
               />
             ))}
@@ -1118,6 +1126,7 @@ function RoomItem({
   onTogglePin,
   onArchive,
   onToggleDnd,
+  confirmDelete: confirmDeleteProp,
   getLastMessage,
 }: {
   room: JoinedRoom;
@@ -1126,6 +1135,7 @@ function RoomItem({
   onTogglePin?: () => void;
   onArchive?: () => void;
   onToggleDnd?: () => void;
+  confirmDelete?: boolean;
   getLastMessage: (code: string) => Promise<{ text: string; timestamp: number; senderUid: string; senderName: string } | null>;
 }) {
   const [preview, setPreview] = useState<{ text: string; timestamp: number; senderUid: string; senderName: string } | null>(null);
@@ -1349,12 +1359,16 @@ function RoomItem({
         )}
         <button
           onClick={(e) => { e.stopPropagation(); onDelete(); }}
-          className={`text-[#333] hover:text-red-400 p-1 rounded-lg hover:bg-red-400/5 transition-all ${showDelete ? 'opacity-100' : 'opacity-0 md:group-hover:opacity-100'}`}
-          title="Remove room"
+          className={`p-1 rounded-lg transition-all ${confirmDeleteProp ? 'text-white bg-red-500 hover:bg-red-600 opacity-100' : 'text-[#333] hover:text-red-400 hover:bg-red-400/5 opacity-100 sm:opacity-0 sm:group-hover:opacity-100'}`}
+          title={confirmDeleteProp ? 'Confirm delete?' : 'Remove room'}
         >
-          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
-            <path fillRule="evenodd" d="M8.75 1A2.75 2.75 0 0 0 6 3.75v.443c-.795.077-1.584.176-2.365.298a.75.75 0 1 0 .23 1.482l.149-.022.841 10.518A2.75 2.75 0 0 0 7.596 19h4.807a2.75 2.75 0 0 0 2.742-2.53l.841-10.52.149.023a.75.75 0 0 0 .23-1.482A41.03 41.03 0 0 0 14 4.193V3.75A2.75 2.75 0 0 0 11.25 1h-2.5ZM10 4c-.84 0-1.673.025-2.5.075V3.75c0-.69.56-1.25 1.25-1.25h2.5c.69 0 1.25.56 1.25 1.25v.325C11.673 4.025 10.84 4 10 4ZM8.58 7.72a.75.75 0 0 0-1.5.06l.3 7.5a.75.75 0 1 0 1.5-.06l-.3-7.5Zm4.42.06a.75.75 0 0 0-1.5-.06l-.3 7.5a.75.75 0 1 0 1.5.06l.3-7.5Z" clipRule="evenodd" />
-          </svg>
+          {confirmDeleteProp ? (
+            <span className="text-[10px] font-bold px-1">Confirm?</span>
+          ) : (
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4">
+              <path fillRule="evenodd" d="M8.75 1A2.75 2.75 0 0 0 6 3.75v.443c-.795.077-1.584.176-2.365.298a.75.75 0 1 0 .23 1.482l.149-.022.841 10.518A2.75 2.75 0 0 0 7.596 19h4.807a2.75 2.75 0 0 0 2.742-2.53l.841-10.52.149.023a.75.75 0 0 0 .23-1.482A41.03 41.03 0 0 0 14 4.193V3.75A2.75 2.75 0 0 0 11.25 1h-2.5ZM10 4c-.84 0-1.673.025-2.5.075V3.75c0-.69.56-1.25 1.25-1.25h2.5c.69 0 1.25.56 1.25 1.25v.325C11.673 4.025 10.84 4 10 4ZM8.58 7.72a.75.75 0 0 0-1.5.06l.3 7.5a.75.75 0 1 0 1.5-.06l-.3-7.5Zm4.42.06a.75.75 0 0 0-1.5-.06l-.3 7.5a.75.75 0 1 0 1.5.06l.3-7.5Z" clipRule="evenodd" />
+            </svg>
+          )}
         </button>
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 text-[#333] group-hover:text-[#555] transition-colors shrink-0">
           <path fillRule="evenodd" d="M7.21 14.77a.75.75 0 0 1 .02-1.06L11.168 10 7.23 6.29a.75.75 0 1 1 1.04-1.08l4.5 4.25a.75.75 0 0 1 0 1.08l-4.5 4.25a.75.75 0 0 1-1.06-.02Z" clipRule="evenodd" />

@@ -251,7 +251,7 @@ export function useVoiceCall(roomCode: string | undefined) {
     if (!roomCode || !user) return false;
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: { frameRate: { ideal: 15 } },
+        video: { frameRate: { ideal: 30 }, width: { ideal: 1280 }, height: { ideal: 720 } },
       });
       const track = stream.getVideoTracks()[0];
       if (!track) {
@@ -668,9 +668,18 @@ export function useVoiceCall(roomCode: string | undefined) {
     [roomCode, user]
   );
 
-  const dismissInvitation = useCallback(() => {
+  const dismissInvitation = useCallback(async () => {
+    if (!roomCode || !user) { setCallInvitations([]); return; }
+    try {
+      const snap = await getDocs(collection(db, 'rooms', roomCode, 'calls', 'current', 'invitations'));
+      const batch: Promise<any>[] = [];
+      snap.forEach((d) => {
+        if (d.data().targetUid === user.uid) batch.push(deleteDoc(d.ref));
+      });
+      await Promise.all(batch);
+    } catch {}
     setCallInvitations([]);
-  }, [setCallInvitations]);
+  }, [roomCode, user, setCallInvitations]);
 
   // Full cleanup on unmount - do not call setState on unmounted component
   useEffect(() => {
